@@ -149,6 +149,16 @@ export class MockExecutionAdapter implements IExecutionAdapter {
     return { success: false, errorMessage: 'Order not found' };
   }
 
+  async verifyProtectionOrder(_symbol: string, orderId: string): Promise<OpenOrderSummary | null> {
+    if (this.activeTpOrder && this.activeTpOrder.orderId === orderId && this.activeTpOrder.status === 'NEW') {
+      return this.activeTpOrder;
+    }
+    if (this.activeSlOrder && this.activeSlOrder.orderId === orderId && this.activeSlOrder.status === 'NEW') {
+      return this.activeSlOrder;
+    }
+    return null;
+  }
+
   async closePositionMarket(_symbol: string, _positionSide: 'LONG' | 'SHORT', _quantity: string): Promise<OrderResult> {
     this.position = null;
     this.activeTpOrder = null;

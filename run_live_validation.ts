@@ -48,108 +48,126 @@ export async function runProductionLiveValidation(): Promise<{
   }
   console.log(`✓ Pre-flight passed: 0 existing exposure.\n`);
 
+  let pipelineResolve: (value: any) => void;
+  let pipelineReject: (reason?: any) => void;
+  const pipelineFinished = new Promise((resolve, reject) => {
+    pipelineResolve = resolve;
+    pipelineReject = reject;
+  });
+
   // 2. Wire Production Pipeline
   telegramService.onAlert(async (alert) => {
-    console.log(`Step 3: Normalized Alert Ingested by Strategy Pipeline:`, {
-      alertId: alert.alertId,
-      symbol: alert.symbol,
-      source: alert.source,
-      rawText: alert.rawText
-    });
+    try {
+      console.log(`Step 3: Normalized Alert Ingested by Strategy Pipeline:`, {
+        alertId: alert.alertId,
+        symbol: alert.symbol,
+        source: alert.source,
+        rawText: alert.rawText
+      });
 
-    const meta = await adapter.getSymbolMetadata(alert.symbol);
-    const markPrice = await adapter.getMarkPrice(alert.symbol);
-    const availableMargin = await adapter.getAvailableMargin();
-    const activeTrades = await repository.getActiveTrades();
+      const meta = await adapter.getSymbolMetadata(alert.symbol);
+      const markPrice = await adapter.getMarkPrice(alert.symbol);
+      const availableMargin = await adapter.getAvailableMargin();
+      const activeTrades = await repository.getActiveTrades();
 
-    // Strategy Admission Evaluation
-    const decision = strategyEngine.evaluateAlert(
-      alert,
-      markPrice,
-      availableMargin,
-      activeTrades.length,
-      meta
-    );
+      // Strategy Admission Evaluation
+      const decision = strategyEngine.evaluateAlert(
+        alert,
+        markPrice,
+        availableMargin,
+        activeTrades.length,
+        meta
+      );
 
-    if (!decision.admitted) {
-      discrepancies.push(`Strategy unexpectedly rejected valid alert: ${decision.rejectionReason}`);
-      return;
-    }
-
-    console.log(`Step 4: Strategy Admitted Signal.`);
-    console.log(`  Primary Quantity: ${decision.primarySizing?.quantityStr} BTC (~$${decision.primarySizing?.resultingNotional.toFixed(2)} notional)`);
-    console.log(`  Required Margin : ~$${decision.primarySizing?.requiredMargin.toFixed(2)} USDT at 5x leverage\n`);
-
-    // 3. Execute Primary Entry via State Machine
-    console.log(`Step 5: Submitting Primary Entry & Establishing Whole Position Protection...`);
-    const trade = await stateMachine.startTrade(decision, alert);
-    capturedTrade = trade;
-
-    console.log(`Trade Record Created: ${trade.id} (State: ${trade.state})`);
-    console.log(`Primary Order ID   : ${trade.primaryOrderId}, Client ID: ${trade.primaryClientOrderId}`);
-    console.log(`Active TP Order ID : ${trade.activeTpOrderId} (Trigger: $${trade.currentTpTriggerPrice})`);
-    console.log(`Active SL Order ID : ${trade.activeSlOrderId} (Trigger: $${trade.currentSlTriggerPrice})`);
-    console.log(`Secondary Limit ID : ${trade.secondaryOrderId} (Price: $${trade.secondaryLimitPrice})\n`);
-
-    // Verify Exchange State after Primary Entry + Protection
-    await new Promise(r => setTimeout(r, 2000));
-    const snap1 = await adapter.fetchExchangeState(trade.symbol);
-    console.log(`Authoritative Exchange State after Primary Entry (Step 5):`);
-    console.log(`  Position Size       : ${snap1.position?.size} BTC (Entry: $${snap1.position?.entryPrice.toFixed(1)})`);
-    console.log(`  Active TP Order     : ${snap1.activeTpOrder ? `Order ${snap1.activeTpOrder.orderId}, origQty: ${snap1.activeTpOrder.origQty}, stopPrice: $${snap1.activeTpOrder.stopPrice}` : 'NONE (DISCREPANCY!)'}`);
-    console.log(`  Active SL Order     : ${snap1.activeSlOrder ? `Order ${snap1.activeSlOrder.orderId}, origQty: ${snap1.activeSlOrder.origQty}, stopPrice: $${snap1.activeSlOrder.stopPrice}` : 'NONE (DISCREPANCY!)'}`);
-
-    // SAFETY INVARIANT CHECK: Both TP and SL must be verified before proceeding
-    if (!snap1.activeTpOrder || !snap1.activeSlOrder) {
-      discrepancies.push("SAFETY INVARIANT VIOLATED: Protection could not be verified on exchange!");
-      console.error("EMERGENCY CLEANUP: Flattening position due to missing protection.");
-      await stateMachine.closeTrade(trade, 'EMERGENCY_MISSING_PROTECTION');
-      return;
-    }
-
-    // 4. Secondary LIMIT Fill Check (Bounded 5s wait)
-    console.log(`\nStep 6: Waiting 5s for secondary LIMIT order fill or timeout...`);
-    await new Promise(r => setTimeout(r, 5000));
-    
-    const snap2 = await adapter.fetchExchangeState(trade.symbol);
-    const hasSecondaryFilled = snap2.position && parseFloat(snap2.position.size) > parseFloat(trade.primaryQuantity || '0');
-
-    if (hasSecondaryFilled) {
-      console.log(`Secondary LIMIT filled naturally! Triggering in-place expansion recalculation...`);
-      await stateMachine.handleSecondaryFill(trade);
-    } else {
-      console.log(`Secondary LIMIT order remained unfilled at -1.0% drop (expected behavior).`);
-      console.log(`Cancelling pending secondary LIMIT order ${trade.secondaryOrderId} via DELETE /capi/v3/order...`);
-      if (trade.secondaryOrderId) {
-        await adapter.cancelOrder(trade.symbol, trade.secondaryOrderId);
+      if (!decision.admitted) {
+        discrepancies.push(`Strategy unexpectedly rejected valid alert: ${decision.rejectionReason}`);
+        pipelineResolve(null);
+        return;
       }
-    }
 
-    // 5. Monitored Verified Close
-    console.log(`\nStep 7: Executing Monitored Close & Zero-Exposure Cleanup...`);
-    await stateMachine.closeTrade(trade, 'LIVE_VALIDATION_COMPLETED');
+      console.log(`Step 4: Strategy Admitted Signal.`);
+      console.log(`  Primary Quantity: ${decision.primarySizing?.quantityStr} BTC (~$${decision.primarySizing?.resultingNotional.toFixed(2)} notional)`);
+      console.log(`  Required Margin : ~$${decision.primarySizing?.requiredMargin.toFixed(2)} USDT at 5x leverage\n`);
 
-    await new Promise(r => setTimeout(r, 2000));
-    const finalSnap = await adapter.fetchExchangeState(trade.symbol);
-    const finalExposure = finalSnap.position ? parseFloat(finalSnap.position.size) : 0;
-    const openOrdersCount = finalSnap.openOrders.length;
-    console.log(`Final Verified Exposure   : ${finalExposure} BTC ($0.00 USDT)`);
-    console.log(`Remaining Open Orders     : ${openOrdersCount}`);
+      // 3. Execute Primary Entry via State Machine
+      console.log(`Step 5: Submitting Primary Entry & Establishing Whole Position Protection...`);
+      const trade = await stateMachine.startTrade(decision, alert);
+      capturedTrade = trade;
 
-    if (finalExposure !== 0) {
-      discrepancies.push(`Residual exposure remains after close: ${finalExposure} BTC`);
-    }
-    if (openOrdersCount !== 0) {
-      discrepancies.push(`Residual open orders remain after close: ${openOrdersCount}`);
-    }
+      console.log(`Trade Record Created: ${trade.id} (State: ${trade.state})`);
+      console.log(`Primary Order ID   : ${trade.primaryOrderId}, Client ID: ${trade.primaryClientOrderId}`);
+      console.log(`Active TP Order ID : ${trade.activeTpOrderId} (Trigger: $${trade.currentTpTriggerPrice})`);
+      console.log(`Active SL Order ID : ${trade.activeSlOrderId} (Trigger: $${trade.currentSlTriggerPrice})`);
+      console.log(`Secondary Limit ID : ${trade.secondaryOrderId} (Price: $${trade.secondaryLimitPrice})\n`);
 
-    // Verify isolated cooldown registration
-    const isCooldownActive = isolatedCooldownTracker.isCoolingDown(trade.symbol);
-    console.log(`Isolated Cooldown Registered: ${isCooldownActive.active} (${isCooldownActive.remainingSeconds}s remaining)\n`);
+      // Verify Exchange State after Primary Entry + Protection using canonical verifyProtectionOrder
+      await new Promise(r => setTimeout(r, 1500));
+      const pos = await adapter.getActivePosition(trade.symbol);
+      const activeTp = trade.activeTpOrderId ? await adapter.verifyProtectionOrder(trade.symbol, trade.activeTpOrderId) : null;
+      const activeSl = trade.activeSlOrderId ? await adapter.verifyProtectionOrder(trade.symbol, trade.activeSlOrderId) : null;
 
-    // Clean up isolated test cooldown file
-    if (fs.existsSync(testCooldownFile)) {
-      fs.unlinkSync(testCooldownFile);
+      console.log(`Authoritative Exchange State after Primary Entry (Step 5):`);
+      console.log(`  Position Size       : ${pos?.size} BTC (Entry: $${pos?.entryPrice.toFixed(1)})`);
+      console.log(`  Active TP Order     : ${activeTp ? `Order ${activeTp.orderId}, status: ${activeTp.status}, origQty: ${activeTp.origQty}, stopPrice: $${activeTp.stopPrice}` : 'NONE (DISCREPANCY!)'}`);
+      console.log(`  Active SL Order     : ${activeSl ? `Order ${activeSl.orderId}, status: ${activeSl.status}, origQty: ${activeSl.origQty}, stopPrice: $${activeSl.stopPrice}` : 'NONE (DISCREPANCY!)'}`);
+
+      // SAFETY INVARIANT CHECK: Both TP and SL must be verified before proceeding
+      if (!activeTp || !activeSl) {
+        discrepancies.push("SAFETY INVARIANT VIOLATED: Protection could not be verified on exchange!");
+        console.error("EMERGENCY CLEANUP: Flattening position due to missing protection.");
+        await stateMachine.closeTrade(trade, 'EMERGENCY_MISSING_PROTECTION');
+        pipelineResolve(null);
+        return;
+      }
+
+      // 4. Secondary LIMIT Fill Check (Bounded 5s wait)
+      console.log(`\nStep 6: Waiting 5s for secondary LIMIT order fill or timeout...`);
+      await new Promise(r => setTimeout(r, 5000));
+      
+      const snap2 = await adapter.fetchExchangeState(trade.symbol);
+      const hasSecondaryFilled = snap2.position && parseFloat(snap2.position.size) > parseFloat(trade.primaryQuantity || '0');
+
+      if (hasSecondaryFilled) {
+        console.log(`Secondary LIMIT filled naturally! Triggering in-place expansion recalculation...`);
+        await stateMachine.handleSecondaryFill(trade);
+      } else {
+        console.log(`Secondary LIMIT order remained unfilled at -1.0% drop (expected behavior).`);
+        console.log(`Cancelling pending secondary LIMIT order ${trade.secondaryOrderId} via DELETE /capi/v3/order...`);
+        if (trade.secondaryOrderId) {
+          await adapter.cancelOrder(trade.symbol, trade.secondaryOrderId);
+        }
+      }
+
+      // 5. Monitored Verified Close
+      console.log(`\nStep 7: Executing Monitored Close & Zero-Exposure Cleanup...`);
+      await stateMachine.closeTrade(trade, 'LIVE_VALIDATION_COMPLETED');
+
+      await new Promise(r => setTimeout(r, 2000));
+      const finalSnap = await adapter.fetchExchangeState(trade.symbol);
+      const finalExposure = finalSnap.position ? parseFloat(finalSnap.position.size) : 0;
+      const openOrdersCount = finalSnap.openOrders.length;
+      console.log(`Final Verified Exposure   : ${finalExposure} BTC ($0.00 USDT)`);
+      console.log(`Remaining Open Orders     : ${openOrdersCount}`);
+
+      if (finalExposure !== 0) {
+        discrepancies.push(`Residual exposure remains after close: ${finalExposure} BTC`);
+      }
+      if (openOrdersCount !== 0) {
+        discrepancies.push(`Residual open orders remain after close: ${openOrdersCount}`);
+      }
+
+      // Verify isolated cooldown registration
+      const isCooldownActive = isolatedCooldownTracker.isCoolingDown(trade.symbol);
+      console.log(`Isolated Cooldown Registered: ${isCooldownActive.active} (${isCooldownActive.remainingSeconds}s remaining)\n`);
+
+      // Clean up isolated test cooldown file
+      if (fs.existsSync(testCooldownFile)) {
+        fs.unlinkSync(testCooldownFile);
+      }
+
+      pipelineResolve(null);
+    } catch (err: any) {
+      pipelineReject(err);
     }
   });
 
@@ -158,7 +176,8 @@ export async function runProductionLiveValidation(): Promise<{
   console.log(`Step 2: Feeding Raw Telegram Text to Ingestion Layer: "${testTelegramMessage}"...`);
   await telegramService.processRawMessage(testTelegramMessage, 'TELEGRAM_VALIDATION_CHANNEL');
 
-  await new Promise(r => setTimeout(r, 4000));
+  // Wait for the full pipeline to finish execution
+  await pipelineFinished;
 
   const transitions = capturedTrade ? await repository.getTransitions(capturedTrade.id) : [];
 

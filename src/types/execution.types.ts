@@ -109,6 +109,7 @@ export interface IExecutionAdapter {
   /** Whole-Position Native Protection */
   establishWholePositionProtection(req: WholePositionProtectionRequest): Promise<ProtectionResult>;
   updateWholePositionProtection(req: UpdateProtectionRequest): Promise<ProtectionResult>;
+  verifyProtectionOrder(symbol: string, orderId: string): Promise<OpenOrderSummary | null>;
 
   /** Position Close & Verification */
   closePositionMarket(symbol: string, positionSide: 'LONG' | 'SHORT', quantity: string): Promise<OrderResult>;

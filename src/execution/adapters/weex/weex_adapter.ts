@@ -201,6 +201,31 @@ export class WeexExecutionAdapter implements IExecutionAdapter {
     };
   }
 
+  async verifyProtectionOrder(symbol: string, orderId: string): Promise<OpenOrderSummary | null> {
+    try {
+      const res = await this.client.request('GET', `/capi/v3/order?symbol=${symbol}&orderId=${orderId}`);
+      if (res.status === 200 && res.data && res.data.orderId && (res.data.status === 'NEW' || res.data.status === 'UNTRIGGERED')) {
+        const o = res.data;
+        return {
+          orderId: String(o.orderId),
+          clientOrderId: o.clientOrderId,
+          type: o.type,
+          side: o.side,
+          positionSide: o.positionSide,
+          price: String(o.price || '0'),
+          origQty: String(o.origQty || '0'),
+          executedQty: String(o.executedQty || '0'),
+          status: o.status,
+          stopPrice: o.stopPrice ? String(o.stopPrice) : undefined,
+          reduceOnly: o.reduceOnly
+        };
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
   async closePositionMarket(symbol: string, positionSide: 'LONG' | 'SHORT', quantity: string): Promise<OrderResult> {
     const opposingSide = positionSide === 'LONG' ? 'SELL' : 'BUY';
     return this.submitEntryOrder({
@@ -236,21 +261,13 @@ export class WeexExecutionAdapter implements IExecutionAdapter {
       reduceOnly: o.reduceOnly
     }));
 
-    // Query active TP / SL orders from history or order stream
-    const historyRes = await this.client.request('GET', `/capi/v3/order/history?symbol=${symbol}`);
-    const historyList: any[] = Array.isArray(historyRes.data) ? historyRes.data : [];
-    
-    // Find active (not canceled) TP/SL orders
-    const activeTp = openOrders.find(o => o.type === 'TAKE_PROFIT_MARKET') || null;
-    const activeSl = openOrders.find(o => o.type === 'STOP_MARKET') || null;
-
     return {
       timestamp: now,
       symbol,
       position,
       openOrders,
-      activeTpOrder: activeTp,
-      activeSlOrder: activeSl,
+      activeTpOrder: null,
+      activeSlOrder: null,
       availableBalanceUsdt: availableMargin
     };
   }

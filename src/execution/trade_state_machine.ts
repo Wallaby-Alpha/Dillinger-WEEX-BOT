@@ -128,12 +128,25 @@ export class TradeStateMachine {
       return trade;
     }
 
+    // 3b. Independent Authoritative Read: Verify both TP and SL exist with active status ('UNTRIGGERED' or 'NEW') on exchange
+    const tpVerify = await this.adapter.verifyProtectionOrder(trade.symbol, tpRes.orderId!);
+    const slVerify = await this.adapter.verifyProtectionOrder(trade.symbol, slRes.orderId!);
+
+    const isTpActive = tpVerify && (tpVerify.status === 'UNTRIGGERED' || tpVerify.status === 'NEW');
+    const isSlActive = slVerify && (slVerify.status === 'UNTRIGGERED' || slVerify.status === 'NEW');
+
+    if (!isTpActive || !isSlActive) {
+      trade.lastError = `Protection independent verification failed on exchange: TP=${!!isTpActive}, SL=${!!isSlActive}`;
+      await this.transition(trade, TradeState.RECONCILIATION_REQUIRED, "Failed independent exchange protection verification");
+      return trade;
+    }
+
     trade.activeTpOrderId = tpRes.orderId;
     trade.activeSlOrderId = slRes.orderId;
     trade.currentTpTriggerPrice = tpPrice;
     trade.currentSlTriggerPrice = slPrice;
 
-    await this.transition(trade, TradeState.POSITION_PROTECTED, "Initial native whole-position protection verified");
+    await this.transition(trade, TradeState.POSITION_PROTECTED, "Initial native whole-position protection independently verified on exchange");
 
     // 4. Submit Secondary Limit Entry Order (if configured)
     if (decision.secondarySizing && decision.secondarySizing.valid) {

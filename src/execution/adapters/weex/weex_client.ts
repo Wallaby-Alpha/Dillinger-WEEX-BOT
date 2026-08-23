@@ -60,7 +60,17 @@ export class WeexRestClient {
         body: bodyStr || undefined
       });
 
-      const json = await res.json().catch(() => null);
+      const text = await res.text();
+      let json: any = null;
+      if (text && text.length > 0) {
+        try {
+          // Prevent JavaScript IEEE-754 precision loss on 64-bit integer IDs
+          const safeText = text.replace(/"(orderId|id)"\s*:\s*(\d{15,})/g, '"$1": "$2"');
+          json = JSON.parse(safeText);
+        } catch {
+          json = null;
+        }
+      }
 
       if (res.status >= 400) {
         logger.warn({ status: res.status, method, path, response: json }, "WEEX API request returned non-2xx status.");
