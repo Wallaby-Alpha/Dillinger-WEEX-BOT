@@ -113,8 +113,11 @@ export class WeexExecutionAdapter implements IExecutionAdapter {
       newClientOrderId: prefixedClientId
     };
 
-    if (req.type === 'LIMIT' && req.price) {
-      payload.price = req.price;
+    if (req.type === 'LIMIT') {
+      if (req.price) {
+        payload.price = req.price;
+      }
+      payload.timeInForce = 'GTC';
     }
 
     const res = await this.client.request('POST', '/capi/v3/order', payload);
