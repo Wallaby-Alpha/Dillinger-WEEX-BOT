@@ -1,0 +1,248 @@
+import { TradeRecord, TradeState, StateTransitionEvent } from '../types/trade.types.js';
+import { AdmissionDecision } from '../types/strategy.types.js';
+import { NormalizedAlert } from '../types/alert.types.js';
+import { IExecutionAdapter } from '../types/execution.types.js';
+import { ITradeRepository } from '../database/trade_repository.js';
+import { CooldownTracker } from '../strategy/cooldown_tracker.js';
+import { getGitCommitId } from '../utils/git_info.js';
+import { logger } from '../utils/logger.js';
+
+export class TradeStateMachine {
+  private adapter: IExecutionAdapter;
+  private repository: ITradeRepository;
+  private cooldownTracker: CooldownTracker;
+
+  constructor(
+    adapter: IExecutionAdapter,
+    repository: ITradeRepository,
+    cooldownTracker: CooldownTracker
+  ) {
+    this.adapter = adapter;
+    this.repository = repository;
+    this.cooldownTracker = cooldownTracker;
+  }
+
+  private async transition(trade: TradeRecord, toState: TradeState, reason: string, metadata?: Record<string, any>): Promise<void> {
+    const fromState = trade.state;
+    trade.state = toState;
+    trade.updatedAt = Date.now();
+
+    const event: StateTransitionEvent = {
+      tradeId: trade.id,
+      fromState,
+      toState,
+      timestamp: Date.now(),
+      triggerReason: reason,
+      metadata
+    };
+
+    await this.repository.recordTransition(event);
+    await this.repository.saveTrade(trade);
+  }
+
+  /**
+   * Initializes and executes a full trade lifecycle from an admitted alert.
+   */
+  async startTrade(decision: AdmissionDecision, alert: NormalizedAlert): Promise<TradeRecord> {
+    const tradeId = `trade_${decision.symbol}_${Date.now()}`;
+    const gitCommit = getGitCommitId();
+
+    const trade: TradeRecord = {
+      id: tradeId,
+      alertId: alert.alertId,
+      symbol: decision.symbol,
+      state: TradeState.ADMISSION_PENDING,
+      gitCommitId: gitCommit,
+      strategyConfigSnapshot: decision.configSnapshot,
+      currentPositionSize: '0',
+      weightedAverageEntryPrice: 0,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+
+    await this.repository.saveTrade(trade);
+    await this.transition(trade, TradeState.ENTRY_SUBMITTED, "Submitting primary market entry");
+
+    // 1. Submit Primary Market Entry
+    const primarySizing = decision.primarySizing!;
+    const primaryClientOrderId = `b-${trade.id}-p1`;
+
+    const entryRes = await this.adapter.submitEntryOrder({
+      symbol: trade.symbol,
+      side: 'BUY',
+      type: 'MARKET',
+      positionSide: 'LONG',
+      quantity: primarySizing.quantityStr,
+      clientOrderId: primaryClientOrderId
+    });
+
+    if (!entryRes.success) {
+      trade.lastError = `Primary entry failed: ${entryRes.errorMessage}`;
+      await this.transition(trade, TradeState.TERMINAL_FAILED, "Primary entry rejected by exchange");
+      return trade;
+    }
+
+    trade.primaryOrderId = entryRes.orderId;
+    trade.primaryClientOrderId = primaryClientOrderId;
+    trade.primaryQuantity = primarySizing.quantityStr;
+    trade.primaryFilledAt = Date.now();
+
+    await this.transition(trade, TradeState.POSITION_ACTIVE_UNPROTECTED, "Primary entry filled");
+
+    // 2. Fetch authoritative position
+    const pos = await this.adapter.getActivePosition(trade.symbol);
+    if (!pos) {
+      trade.lastError = "Position not found after primary fill confirmation";
+      await this.transition(trade, TradeState.RECONCILIATION_REQUIRED, "Divergence after entry fill");
+      return trade;
+    }
+
+    trade.currentPositionSize = pos.size;
+    trade.primaryEntryPrice = pos.entryPrice;
+    trade.weightedAverageEntryPrice = pos.entryPrice;
+
+    // 3. Establish Native Whole-Position Protection (quantity: "0")
+    const meta = await this.adapter.getSymbolMetadata(trade.symbol);
+    const tpPrice = (pos.entryPrice * (1 + trade.strategyConfigSnapshot.takeProfitPct)).toFixed(meta.pricePrecision);
+    const slPrice = (pos.entryPrice * (1 - trade.strategyConfigSnapshot.stopLossPct)).toFixed(meta.pricePrecision);
+
+    const tpRes = await this.adapter.establishWholePositionProtection({
+      symbol: trade.symbol,
+      positionSide: 'LONG',
+      planType: 'TAKE_PROFIT',
+      triggerPrice: tpPrice,
+      clientAlgoId: `b-${trade.id}-tp1`
+    });
+
+    const slRes = await this.adapter.establishWholePositionProtection({
+      symbol: trade.symbol,
+      positionSide: 'LONG',
+      planType: 'STOP_LOSS',
+      triggerPrice: slPrice,
+      clientAlgoId: `b-${trade.id}-sl1`
+    });
+
+    if (!tpRes.success || !slRes.success) {
+      trade.lastError = `Protection creation failed: TP=${tpRes.errorMessage}, SL=${slRes.errorMessage}`;
+      await this.transition(trade, TradeState.RECONCILIATION_REQUIRED, "Failed to establish native protection");
+      return trade;
+    }
+
+    trade.activeTpOrderId = tpRes.orderId;
+    trade.activeSlOrderId = slRes.orderId;
+    trade.currentTpTriggerPrice = tpPrice;
+    trade.currentSlTriggerPrice = slPrice;
+
+    await this.transition(trade, TradeState.POSITION_PROTECTED, "Initial native whole-position protection verified");
+
+    // 4. Submit Secondary Limit Entry Order (if configured)
+    if (decision.secondarySizing && decision.secondarySizing.valid) {
+      const secondaryPrice = (pos.entryPrice * (1 - trade.strategyConfigSnapshot.secondaryEntryDropPct)).toFixed(meta.pricePrecision);
+      const secondaryClientOrderId = `b-${trade.id}-p2`;
+
+      const limitRes = await this.adapter.submitEntryOrder({
+        symbol: trade.symbol,
+        side: 'BUY',
+        type: 'LIMIT',
+        positionSide: 'LONG',
+        quantity: decision.secondarySizing.quantityStr,
+        price: secondaryPrice,
+        clientOrderId: secondaryClientOrderId
+      });
+
+      if (limitRes.success) {
+        trade.secondaryOrderId = limitRes.orderId;
+        trade.secondaryClientOrderId = secondaryClientOrderId;
+        trade.secondaryQuantity = decision.secondarySizing.quantityStr;
+        trade.secondaryLimitPrice = parseFloat(secondaryPrice);
+        await this.transition(trade, TradeState.SECONDARY_LIMIT_SUBMITTED, "Secondary limit entry order placed");
+      }
+    }
+
+    return trade;
+  }
+
+  /**
+   * Handles secondary fill detection and in-place protection modification.
+   */
+  async handleSecondaryFill(trade: TradeRecord): Promise<void> {
+    await this.transition(trade, TradeState.EXPANDED_POSITION_RECALCULATING, "Secondary entry filled, recalculating protection");
+
+    const pos = await this.adapter.getActivePosition(trade.symbol);
+    if (!pos) {
+      trade.lastError = "Position disappeared during secondary fill recalculation";
+      await this.transition(trade, TradeState.RECONCILIATION_REQUIRED, "Position missing on expansion");
+      return;
+    }
+
+    trade.currentPositionSize = pos.size;
+    trade.weightedAverageEntryPrice = pos.entryPrice;
+    trade.secondaryFilledAt = Date.now();
+
+    const meta = await this.adapter.getSymbolMetadata(trade.symbol);
+    const combinedTp = (pos.entryPrice * (1 + trade.strategyConfigSnapshot.takeProfitPct)).toFixed(meta.pricePrecision);
+    const combinedSl = (pos.entryPrice * (1 - trade.strategyConfigSnapshot.stopLossPct)).toFixed(meta.pricePrecision);
+
+    // Modify existing protection in-place
+    if (trade.activeTpOrderId) {
+      await this.adapter.updateWholePositionProtection({
+        symbol: trade.symbol,
+        orderId: trade.activeTpOrderId,
+        triggerPrice: combinedTp
+      });
+      trade.currentTpTriggerPrice = combinedTp;
+    }
+
+    if (trade.activeSlOrderId) {
+      await this.adapter.updateWholePositionProtection({
+        symbol: trade.symbol,
+        orderId: trade.activeSlOrderId,
+        triggerPrice: combinedSl
+      });
+      trade.currentSlTriggerPrice = combinedSl;
+    }
+
+    await this.transition(trade, TradeState.EXPANDED_PROTECTED, "Protection updated in-place for expanded position");
+  }
+
+  /**
+   * Closes the active trade, cancels residual orders, and verifies zero exposure.
+   */
+  async closeTrade(trade: TradeRecord, reason: string): Promise<void> {
+    await this.transition(trade, TradeState.CLOSING_SUBMITTED, `Closing trade: ${reason}`);
+
+    // 1. Cancel secondary limit order if still open
+    if (trade.secondaryOrderId) {
+      try {
+        await this.adapter.cancelOrder(trade.symbol, trade.secondaryOrderId);
+      } catch (err: any) {
+        logger.warn({ err: err.message }, "Error cancelling secondary limit order during close.");
+      }
+    }
+
+    // 2. Submit market close order
+    const pos = await this.adapter.getActivePosition(trade.symbol);
+    if (pos && parseFloat(pos.size) > 0) {
+      await this.adapter.closePositionMarket(trade.symbol, pos.side, pos.size);
+    }
+
+    // 3. Verify zero exposure via REST
+    const verifyPos = await this.adapter.getActivePosition(trade.symbol);
+    if (verifyPos && parseFloat(verifyPos.size) > 0) {
+      trade.lastError = "Residual position remaining after close execution";
+      await this.transition(trade, TradeState.RECONCILIATION_REQUIRED, "Close verification failed");
+      return;
+    }
+
+    trade.currentPositionSize = '0';
+    trade.closedAt = Date.now();
+    await this.transition(trade, TradeState.CLOSED_VERIFIED, `Trade closed and 0 exposure verified (${reason})`);
+
+    // 4. Register 4-hour symbol cooldown
+    this.cooldownTracker.setCooldown(
+      trade.symbol,
+      trade.strategyConfigSnapshot.symbolCooldownSec,
+      `TRADE_COMPLETED_${trade.id}`
+    );
+  }
+}
