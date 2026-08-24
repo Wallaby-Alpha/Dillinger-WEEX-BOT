@@ -19,7 +19,7 @@ export enum TradeState {
 
 export interface TradeRecord {
   id: string;
-  alertId: string;
+  alertId?: string;
   symbol: string;
   state: TradeState;
   gitCommitId: string;

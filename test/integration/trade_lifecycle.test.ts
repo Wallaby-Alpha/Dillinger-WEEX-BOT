@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { StrategyEngine } from '../../src/strategy/strategy_engine.js';
+import { createStrategyConfigSnapshot } from '../../src/config/strategy.config.js';
 import { CooldownTracker } from '../../src/strategy/cooldown_tracker.js';
 import { MockExecutionAdapter } from '../../src/execution/adapters/mock/mock_adapter.js';
 import { InMemoryTradeRepository } from '../../src/database/trade_repository.js';
@@ -17,7 +18,12 @@ describe('Phase 5: End-to-End Trade Lifecycle Integration Suite', () => {
     const adapter = new MockExecutionAdapter();
     const repository = new InMemoryTradeRepository();
     const cooldownTracker = new CooldownTracker(cooldownPath);
-    const strategyEngine = new StrategyEngine(undefined, cooldownTracker);
+    const customConfig = createStrategyConfigSnapshot({
+      secondaryNotionalUsd: 35.00,
+      primaryNotionalUsd: 35.00,
+      secondaryEntryDropPct: 0.01
+    });
+    const strategyEngine = new StrategyEngine(customConfig, cooldownTracker);
     const stateMachine = new TradeStateMachine(adapter, repository, cooldownTracker);
 
     // 2. Ingestion Layer: Parse incoming Telegram alert
@@ -39,7 +45,7 @@ describe('Phase 5: End-to-End Trade Lifecycle Integration Suite', () => {
     );
 
     expect(decision.admitted).toBe(true);
-    expect(decision.configSnapshot.version).toBe('1.0.0');
+    expect(decision.configSnapshot.version).toBe('1.1.0');
 
     // 4. Execution Layer: Initiate trade lifecycle
     const trade = await stateMachine.startTrade(decision, alert);

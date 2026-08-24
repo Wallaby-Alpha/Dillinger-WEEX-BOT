@@ -21,13 +21,13 @@ export class WeexExecutionAdapter implements IExecutionAdapter {
     this.client = client || new WeexRestClient();
   }
 
-  async getSymbolMetadata(symbol: string): Promise<SymbolMetadata> {
+  async getSymbolMetadata(symbol: string): Promise<SymbolMetadata | null> {
     const res = await this.client.request('GET', '/capi/v3/market/exchangeInfo', null, true);
     const symbolsList: any[] = res.data?.symbols || res.data?.data?.symbols || [];
     const raw = symbolsList.find((s: any) => s.symbol === symbol || s.displaySymbol === symbol);
 
     if (!raw) {
-      throw new Error(`Symbol ${symbol} not found in WEEX exchangeInfo.`);
+      return null;
     }
 
     return {
@@ -75,29 +75,36 @@ export class WeexExecutionAdapter implements IExecutionAdapter {
     logger.info({ symbol, leverage }, "WEEX leverage confirmed.");
   }
 
-  async getActivePosition(symbol: string): Promise<PositionState | null> {
+  async getActivePositions(): Promise<PositionState[]> {
     const res = await this.client.request('GET', '/capi/v3/account/position/allPosition');
     const positions: any[] = Array.isArray(res.data) ? res.data : (res.data?.data || []);
-    const pos = positions.find((p: any) => p.symbol === symbol && parseFloat(p.size || p.total || '0') > 0);
+    
+    return positions
+      .filter((p: any) => parseFloat(p.size || p.total || '0') > 0)
+      .map((pos: any) => {
+        const size = String(pos.size || pos.total || '0');
+        const openValue = String(pos.openValue || '0');
+        const entryPrice = parseFloat(size) > 0 ? parseFloat(openValue) / parseFloat(size) : 0;
+        
+        return {
+          symbol: pos.symbol,
+          side: pos.side === 'SHORT' ? 'SHORT' : 'LONG',
+          size,
+          openValue,
+          entryPrice,
+          isolatedMargin: String(pos.isolatedMargin || pos.marginSize || '0'),
+          liquidatePrice: pos.liquidatePrice,
+          unrealizePnl: pos.unrealizePnl,
+          // WEEX V3 usually returns protection order IDs in the position payload
+          activeTpOrderId: pos.stopProfitId || pos.tpOrderId || undefined,
+          activeSlOrderId: pos.stopLossId || pos.slOrderId || undefined
+        };
+      });
+  }
 
-    if (!pos) {
-      return null;
-    }
-
-    const size = String(pos.size || pos.total || '0');
-    const openValue = String(pos.openValue || '0');
-    const entryPrice = parseFloat(size) > 0 ? parseFloat(openValue) / parseFloat(size) : 0;
-
-    return {
-      symbol: pos.symbol,
-      side: pos.side === 'SHORT' ? 'SHORT' : 'LONG',
-      size,
-      openValue,
-      entryPrice,
-      isolatedMargin: String(pos.isolatedMargin || pos.marginSize || '0'),
-      liquidatePrice: pos.liquidatePrice,
-      unrealizePnl: pos.unrealizePnl
-    };
+  async getActivePosition(symbol: string): Promise<PositionState | null> {
+    const positions = await this.getActivePositions();
+    return positions.find(p => p.symbol === symbol) || null;
   }
 
   async submitEntryOrder(req: EntryOrderRequest): Promise<OrderResult> {
@@ -118,6 +125,16 @@ export class WeexExecutionAdapter implements IExecutionAdapter {
         payload.price = req.price;
       }
       payload.timeInForce = 'GTC';
+    }
+
+    if (req.presetTakeProfitPrice) {
+      payload.tpTriggerPrice = req.presetTakeProfitPrice;
+      payload.tpWorkingType = 'MARK_PRICE';
+    }
+
+    if (req.presetStopLossPrice) {
+      payload.slTriggerPrice = req.presetStopLossPrice;
+      payload.slWorkingType = 'MARK_PRICE';
     }
 
     const res = await this.client.request('POST', '/capi/v3/order', payload);
@@ -224,6 +241,22 @@ export class WeexExecutionAdapter implements IExecutionAdapter {
     } catch {
       return null;
     }
+  }
+
+  async listActiveProtectionOrders(symbol: string, positionSide: string): Promise<OpenOrderSummary[]> {
+    const res = await this.client.request('GET', `/capi/v3/openAlgoOrders?symbol=${symbol}`);
+    const orders: any[] = res.data || [];
+    
+    logger.info({ rawWeexResponse: res.data }, "RAW WEEX ALGO RESPONSE");
+    
+    return orders
+      .filter((o: any) => o.positionSide === positionSide && o.algoStatus === 'UNTRIGGERED')
+      .map((o: any) => ({
+        orderId: o.algoId,
+        status: o.algoStatus,
+        filledQuantity: o.quantity || '0',
+        averagePrice: o.actualPrice || '0'
+      } as any as OpenOrderSummary));
   }
 
   async closePositionMarket(symbol: string, positionSide: 'LONG' | 'SHORT', quantity: string): Promise<OrderResult> {

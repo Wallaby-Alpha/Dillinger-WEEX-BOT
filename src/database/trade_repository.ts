@@ -5,6 +5,7 @@ export interface ITradeRepository {
   saveTrade(trade: TradeRecord): Promise<void>;
   getTrade(id: string): Promise<TradeRecord | null>;
   getActiveTrades(): Promise<TradeRecord[]>;
+  hasSymbolBeenTraded(symbol: string): Promise<boolean>;
   recordTransition(event: StateTransitionEvent): Promise<void>;
   getTransitions(tradeId: string): Promise<StateTransitionEvent[]>;
 }
@@ -35,6 +36,10 @@ export class InMemoryTradeRepository implements ITradeRepository {
       TradeState.CLOSING_SUBMITTED
     ];
     return Array.from(this.trades.values()).filter(t => activeStates.includes(t.state));
+  }
+
+  async hasSymbolBeenTraded(symbol: string): Promise<boolean> {
+    return Array.from(this.trades.values()).some(t => t.symbol === symbol);
   }
 
   async recordTransition(event: StateTransitionEvent): Promise<void> {

@@ -23,6 +23,8 @@ export interface EntryOrderRequest {
   quantity: string;
   price?: string;
   clientOrderId: string;
+  presetTakeProfitPrice?: string;
+  presetStopLossPrice?: string;
 }
 
 export interface OrderResult {
@@ -63,6 +65,8 @@ export interface PositionState {
   isolatedMargin: string;
   liquidatePrice?: string;
   unrealizePnl?: string;
+  activeTpOrderId?: string;
+  activeSlOrderId?: string;
 }
 
 export interface OpenOrderSummary {
@@ -93,13 +97,14 @@ export interface IExecutionAdapter {
   /** Exchange identification */
   readonly exchangeName: string;
 
-  /** Market metadata & ticker queries */
-  getSymbolMetadata(symbol: string): Promise<SymbolMetadata>;
+  /** Market data */
+  getSymbolMetadata(symbol: string): Promise<SymbolMetadata | null>;
   getMarkPrice(symbol: string): Promise<number>;
 
   /** Account status */
   getAvailableMargin(): Promise<number>;
   setLeverage(symbol: string, leverage: number): Promise<void>;
+  getActivePositions(): Promise<PositionState[]>;
   getActivePosition(symbol: string): Promise<PositionState | null>;
 
   /** Order operations */
@@ -110,6 +115,11 @@ export interface IExecutionAdapter {
   establishWholePositionProtection(req: WholePositionProtectionRequest): Promise<ProtectionResult>;
   updateWholePositionProtection(req: UpdateProtectionRequest): Promise<ProtectionResult>;
   verifyProtectionOrder(symbol: string, orderId: string): Promise<OpenOrderSummary | null>;
+
+  /**
+   * Discovers active conditional/algo orders matching symbol and side.
+   */
+  listActiveProtectionOrders(symbol: string, positionSide: string): Promise<OpenOrderSummary[]>;
 
   /** Position Close & Verification */
   closePositionMarket(symbol: string, positionSide: 'LONG' | 'SHORT', quantity: string): Promise<OrderResult>;

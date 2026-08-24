@@ -33,7 +33,7 @@ describe('Phase 3: Sizing & Normalization Unit Tests', () => {
     expect(res.valid).toBe(true);
     expect(res.quantityStr).toBe('0.0004'); // 35 / 77000 = 0.0004545 -> 0.0004
     expect(res.resultingNotional).toBeLessThanOrEqual(35.0);
-    expect(res.requiredMargin).toBeCloseTo(res.resultingNotional / 5, 2);
+    expect(res.requiredMargin).toBeCloseTo(res.resultingNotional / 10, 2);
   });
 
   it('should quantize contract lot multiples for DOGEUSDT (precision = -2)', () => {

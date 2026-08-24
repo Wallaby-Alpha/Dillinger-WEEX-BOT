@@ -15,17 +15,25 @@ export class AlertParser {
       return { valid: false, rejectReason: 'EMPTY_RAW_TEXT' };
     }
 
-    // Require explicit prefix ($SYMBOL, #SYMBOL, FLAGGED: SYMBOL, Token: SYMBOL, BUY SYMBOL, LONG SYMBOL)
-    // OR explicit USDT contract pair suffix (e.g. BTCUSDT, SOL/USDT)
-    const prefixedMatch = trimmed.match(/(?:\$|#|Token:\s*|FLAGGED:\s*|BUY\s+|LONG\s+|PAIR:\s*)([A-Za-z0-9]{2,10})\b/i);
+    // 1. Try explicit labels first (Symbol: X, Token: X, PAIR: X)
+    const explicitLabelMatch = trimmed.match(/(?:Symbol|Token|PAIR|FLAGGED):\s*(?:\$|#)?([A-Za-z0-9]{2,10})\b/i);
+    // 2. Try action prefixes
+    const actionMatch = trimmed.match(/(?:BUY|LONG)\s+(?:\$|#)?([A-Za-z0-9]{2,10})\b/i);
+    // 3. Try USDT suffix explicitly anywhere in the text
     const usdtMatch = trimmed.match(/\b([A-Za-z0-9]{2,10})(?:USDT|\/USDT)\b/i);
+    // 4. Try loose cashtags ($BTC) and ALL-CAPS hashtags (#BTC) to avoid generic tags like #Stage1
+    const looseTagMatch = trimmed.match(/\$([A-Za-z0-9]{2,10})\b/i) || trimmed.match(/#([A-Z0-9]{2,10})\b/);
 
     let rawSymbol: string | null = null;
 
-    if (prefixedMatch && prefixedMatch[1]) {
-      rawSymbol = prefixedMatch[1];
+    if (explicitLabelMatch && explicitLabelMatch[1]) {
+      rawSymbol = explicitLabelMatch[1];
+    } else if (actionMatch && actionMatch[1]) {
+      rawSymbol = actionMatch[1];
     } else if (usdtMatch && usdtMatch[1]) {
       rawSymbol = usdtMatch[1];
+    } else if (looseTagMatch && looseTagMatch[1]) {
+      rawSymbol = looseTagMatch[1];
     }
 
     if (!rawSymbol) {

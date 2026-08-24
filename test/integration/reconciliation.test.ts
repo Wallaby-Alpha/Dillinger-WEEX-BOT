@@ -35,7 +35,7 @@ describe('Phase 5: Reconciliation Engine Integration Tests', () => {
     );
 
     const trade = await stateMachine.startTrade(decision, alert);
-    expect(trade.state).toBe(TradeState.SECONDARY_LIMIT_SUBMITTED);
+    expect(trade.state).toBe(TradeState.POSITION_PROTECTED);
 
     // Simulate exchange executing native Stop Loss (position flattens)
     await adapter.closePositionMarket(trade.symbol, 'LONG', trade.currentPositionSize);

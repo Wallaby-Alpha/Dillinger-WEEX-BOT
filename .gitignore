@@ -10,3 +10,6 @@ yarn-debug.log*
 yarn-error.log*
 .DS_Store
 cooldown_store*.json
+.bot_instance.lock
+.test_*.json
+

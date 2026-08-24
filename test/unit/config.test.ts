@@ -4,10 +4,10 @@ import { getGitCommitId } from '../../src/utils/git_info.js';
 
 describe('Phase 1: Architecture & Config Suite', () => {
   it('should load frozen immutable default strategy configuration', () => {
-    expect(DEFAULT_STRATEGY_CONFIG.version).toBe('1.0.0');
+    expect(DEFAULT_STRATEGY_CONFIG.version).toBe('1.1.0');
     expect(DEFAULT_STRATEGY_CONFIG.maxNotionalCapUsd).toBe(70.00);
-    expect(DEFAULT_STRATEGY_CONFIG.leverage).toBe(5);
-    expect(DEFAULT_STRATEGY_CONFIG.takeProfitPct).toBe(0.025);
+    expect(DEFAULT_STRATEGY_CONFIG.leverage).toBe(10);
+    expect(DEFAULT_STRATEGY_CONFIG.takeProfitPct).toBe(0.035);
     expect(DEFAULT_STRATEGY_CONFIG.stopLossPct).toBe(0.015);
 
     // Verify immutability
@@ -18,7 +18,7 @@ describe('Phase 1: Architecture & Config Suite', () => {
     const snapshot = createStrategyConfigSnapshot({ takeProfitPct: 0.040 });
     expect(snapshot.takeProfitPct).toBe(0.040);
     expect(snapshot.stopLossPct).toBe(0.015);
-    expect(DEFAULT_STRATEGY_CONFIG.takeProfitPct).toBe(0.025); // Original unchanged
+    expect(DEFAULT_STRATEGY_CONFIG.takeProfitPct).toBe(0.035); // Original unchanged
     expect(Object.isFrozen(snapshot)).toBe(true);
   });
 

@@ -65,7 +65,16 @@ export class WeexRestClient {
       if (text && text.length > 0) {
         try {
           // Prevent JavaScript IEEE-754 precision loss on 64-bit integer IDs
-          const safeText = text.replace(/"(orderId|id)"\s*:\s*(\d{15,})/g, '"$1": "$2"');
+          // Match strings first to skip them, then match unquoted integers >= 15 digits
+          const safeText = text.replace(
+            /"(?:[^"\\]|\\.)*"|([:\[,]\s*)(-?\d{15,})(?=[,}\]\s])/g,
+            (match, prefix, num) => {
+              if (num) {
+                return `${prefix}"${num}"`;
+              }
+              return match;
+            }
+          );
           json = JSON.parse(safeText);
         } catch {
           json = null;

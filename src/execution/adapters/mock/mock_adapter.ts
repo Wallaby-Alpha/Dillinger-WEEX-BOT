@@ -33,7 +33,8 @@ export class MockExecutionAdapter implements IExecutionAdapter {
     maxLeverage: 100
   };
 
-  async getSymbolMetadata(symbol: string): Promise<SymbolMetadata> {
+  async getSymbolMetadata(symbol: string): Promise<SymbolMetadata | null> {
+    if (symbol === 'UNKNOWN') return null;
     return { ...this.metadata, symbol };
   }
 
@@ -47,8 +48,12 @@ export class MockExecutionAdapter implements IExecutionAdapter {
 
   async setLeverage(_symbol: string, _leverage: number): Promise<void> {}
 
+  async getActivePositions(): Promise<PositionState[]> {
+    return this.position ? [this.position] : [];
+  }
+
   async getActivePosition(_symbol: string): Promise<PositionState | null> {
-    return this.position;
+    return this.position && this.position.symbol === _symbol ? this.position : null;
   }
 
   async submitEntryOrder(req: EntryOrderRequest): Promise<OrderResult> {
@@ -157,6 +162,13 @@ export class MockExecutionAdapter implements IExecutionAdapter {
       return this.activeSlOrder;
     }
     return null;
+  }
+
+  async listActiveProtectionOrders(symbol: string, positionSide: string): Promise<OpenOrderSummary[]> {
+    const result: OpenOrderSummary[] = [];
+    if (this.activeTpOrder && this.activeTpOrder.positionSide === positionSide) result.push(this.activeTpOrder);
+    if (this.activeSlOrder && this.activeSlOrder.positionSide === positionSide) result.push(this.activeSlOrder);
+    return result;
   }
 
   async closePositionMarket(_symbol: string, _positionSide: 'LONG' | 'SHORT', _quantity: string): Promise<OrderResult> {

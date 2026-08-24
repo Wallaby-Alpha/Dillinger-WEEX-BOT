@@ -22,9 +22,18 @@ export class AdmissionBarrier {
     markPrice: number,
     availableMarginUsdt: number,
     activeTradesCount: number,
-    meta: SymbolMetadata,
+    meta: SymbolMetadata | null,
     config: StrategyConfig
   ): AdmissionDecision {
+    // 0. Check symbol validity
+    if (!meta) {
+      return {
+        admitted: false,
+        symbol,
+        configSnapshot: config,
+        rejectionReason: `INVALID_SYMBOL: Symbol ${symbol} is not listed or not supported on WEEX.`
+      };
+    }
     // 1. Check Cooldown
     const cooldown = this.cooldownTracker.isCoolingDown(symbol);
     if (cooldown.active) {

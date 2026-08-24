@@ -8,8 +8,10 @@ import { TelegramIngestionService } from './ingestion/telegram_client.js';
 import { StrategyEngine } from './strategy/strategy_engine.js';
 import { WeexExecutionAdapter } from './execution/adapters/weex/weex_adapter.js';
 import { InMemoryTradeRepository } from './database/trade_repository.js';
+import { PostgresTradeRepository } from './database/postgres_trade_repository.js';
 import { TradeStateMachine } from './execution/trade_state_machine.js';
 import { ReconciliationEngine } from './execution/reconciler.js';
+import { TradeState } from './types/trade.types.js';
 
 export async function bootstrap() {
   // 1. Single Instance Lock (prevents duplicate Droplet processes)
@@ -19,19 +21,137 @@ export async function bootstrap() {
   const commitId = getGitCommitId();
   logger.info({ commitId, env: ENV.NODE_ENV }, "Starting WEEX Momentum Trading Bot...");
 
-  // 2. Initialize Layer Components
+  // 2. Initialize Ingestion (Always needed)
+  const telegramService = new TelegramIngestionService();
+  const telegramBotListener = new (await import('./ingestion/telegram_bot.js')).TelegramBotListener(telegramService);
+
+  if (ENV.DRY_RUN) {
+    logger.info("=========================================");
+    logger.info("   DRY_RUN ENABLED. EXECUTING INGESTION ONLY. ");
+    logger.info("   EXECUTION AND STRATEGY ENGINES ARE UNREACHABLE.");
+    logger.info("=========================================");
+
+    telegramService.onAlert(async (alert) => {
+      logger.info({ alertId: alert.alertId, symbol: alert.symbol, normalizedOutput: alert }, "DRY_RUN: Normalized alert produced.");
+    });
+
+    telegramService.start();
+    telegramBotListener.start();
+
+    const shutdown = async (signal: string) => {
+      logger.info({ signal }, "Received shutdown signal. Performing graceful cleanup...");
+      telegramBotListener.stop();
+      telegramService.stop();
+      singleInstance.releaseLock();
+      logger.info("Graceful shutdown complete.");
+      process.exit(0);
+    };
+
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+    return; // Exit bootstrap early, WEEX adapter is structurally unreachable
+  }
+
+  // === LIVE EXECUTION PIPELINE (Only instantiated if DRY_RUN is false) ===
+  if (!ENV.DATABASE_URL) {
+    logger.fatal("DATABASE_URL is not configured. Failing closed to prevent data loss in live mode.");
+    process.exit(1);
+  }
+
   const adapter = new WeexExecutionAdapter();
-  const repository = new InMemoryTradeRepository();
+  const repository = new PostgresTradeRepository();
   const strategyEngine = new StrategyEngine();
   const stateMachine = new TradeStateMachine(adapter, repository, strategyEngine.getCooldownTracker());
   const reconciler = new ReconciliationEngine(stateMachine, adapter, repository);
-  const telegramService = new TelegramIngestionService();
 
   // 3. Startup Reconciliation: Verify exchange state before admitting new signals
   logger.info("Executing startup exchange reconciliation...");
   try {
     const margin = await adapter.getAvailableMargin();
     logger.info({ availableMarginUsdt: margin }, "WEEX exchange connectivity verified.");
+
+    const activeExchangePositions = await adapter.getActivePositions();
+    const activeDbTrades = await repository.getActiveTrades();
+    const activeDbSymbols = new Set(activeDbTrades.map(t => t.symbol));
+
+    for (const pos of activeExchangePositions) {
+      if (!activeDbSymbols.has(pos.symbol)) {
+        logger.warn({ symbol: pos.symbol, size: pos.size }, "Found orphaned exchange position without active DB trade.");
+        
+        let isProtected = false;
+        let activeTpId: string | undefined = pos.activeTpOrderId;
+        let activeSlId: string | undefined = pos.activeSlOrderId;
+        
+        // 1. Genuine Discovery: Fetch open algo orders for this symbol/side
+        try {
+          const algos = await adapter.listActiveProtectionOrders(pos.symbol, pos.side);
+          logger.info({ rawAlgoOrders: algos }, "RAW DISCOVERY PAYLOAD");
+          
+          if (algos.length > 0) {
+             // 2. Verification: Explicitly verify the first discovered algo ID
+             const candidateId = algos[0].orderId;
+             const summary = await adapter.verifyProtectionOrder(pos.symbol, candidateId);
+             
+             if (summary && (summary.status === 'NEW' || summary.status === 'UNTRIGGERED')) {
+                isProtected = true;
+                activeTpId = candidateId;
+                if (algos.length > 1) activeSlId = algos[1].orderId;
+             } else {
+                logger.warn({ symbol: pos.symbol, candidateId, status: summary?.status }, "Discovery found algoId but verifyProtectionOrder rejected it. Treating as UNVERIFIED/UNPROTECTED.");
+             }
+          }
+        } catch (err: any) {
+          logger.warn({ err: err.message, symbol: pos.symbol }, "Failed to discover active protection orders.");
+        }
+        
+        if (isProtected) {
+          logger.info({ symbol: pos.symbol }, "PROTECTED ORPHAN: Reconstructing trade record to resume tracking.");
+          
+          const reconstructedTrade: any = {
+            id: `trade_${pos.symbol}_recovered_${Date.now()}`,
+            symbol: pos.symbol,
+            state: TradeState.POSITION_PROTECTED,
+            gitCommitId: commitId,
+            strategyConfigSnapshot: strategyEngine.getConfig(),
+            primaryQuantity: pos.size,
+            primaryEntryPrice: pos.entryPrice,
+            currentPositionSize: pos.size,
+            weightedAverageEntryPrice: pos.entryPrice,
+            activeTpOrderId: activeTpId,
+            activeSlOrderId: activeSlId,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            reconciliationNotes: "Recovered from protected orphan on startup"
+          };
+          
+          try {
+            await repository.saveTrade(reconstructedTrade);
+            logger.info({ tradeId: reconstructedTrade.id }, "Recovered trade persisted. Resuming normal lifecycle monitoring.");
+          } catch (err: any) {
+            logger.fatal({ err: err.message, symbol: pos.symbol }, "CRITICAL: Failed to persist reconstructed trade. Cannot safely track protected position. ROUTING TO EMERGENCY CLOSE.");
+            try {
+               await adapter.closePositionMarket(pos.symbol, pos.side, pos.size);
+               logger.info({ symbol: pos.symbol }, "Emergency close order submitted for untrackable protected position.");
+            } catch (closeErr: any) {
+               logger.fatal({ err: closeErr.message, symbol: pos.symbol }, "CRITICAL: Emergency close for untrackable position failed. Halting bot with unresolved exposure!");
+               process.exit(1);
+            }
+          }
+        } else {
+          logger.error({ symbol: pos.symbol }, "UNPROTECTED ORPHAN: NO UNPROTECTED POSITION INVARIANT VIOLATED. ROUTING TO EMERGENCY CLOSE.");
+          
+          try {
+             await adapter.closePositionMarket(pos.symbol, pos.side, pos.size);
+             logger.info({ symbol: pos.symbol }, "Emergency close order submitted for unprotected orphan.");
+          } catch (err: any) {
+             logger.fatal({ err: err.message, symbol: pos.symbol }, "CRITICAL: Emergency close for unprotected orphan failed. Halting bot with unresolved exposure!");
+             process.exit(1);
+          }
+        }
+      }
+    }
+
   } catch (err: any) {
     logger.error({ err: err.message }, "Failed initial exchange connectivity check on startup.");
   }
@@ -42,7 +162,7 @@ export async function bootstrap() {
       logger.info({ alertId: alert.alertId, symbol: alert.symbol }, "Processing incoming alert through pipeline.");
 
       const meta = await adapter.getSymbolMetadata(alert.symbol);
-      const markPrice = await adapter.getMarkPrice(alert.symbol);
+      const markPrice = meta ? await adapter.getMarkPrice(alert.symbol) : 0;
       const availableMargin = await adapter.getAvailableMargin();
       const activeTrades = await repository.getActiveTrades();
 
@@ -59,6 +179,15 @@ export async function bootstrap() {
         return;
       }
 
+      // 4.5 First-Time Symbol Audit Check (Fire-and-forget, non-blocking)
+      repository.hasSymbolBeenTraded(alert.symbol).then(hasBeenTraded => {
+        if (!hasBeenTraded) {
+          logger.warn({ symbol: alert.symbol, newSymbol: true }, "FIRST-TIME SYMBOL: Admitting trade for a symbol never seen before.");
+        }
+      }).catch(err => {
+        logger.error({ err: err.message, symbol: alert.symbol }, "Failed to verify first-time symbol status.");
+      });
+
       // Execute trade via state machine
       await stateMachine.startTrade(decision, alert);
     } catch (err: any) {
@@ -69,6 +198,7 @@ export async function bootstrap() {
   // 5. Start Background Loops
   reconciler.start(SYSTEM_CONFIG.reconciliationIntervalMs);
   telegramService.start();
+  telegramBotListener.start();
 
   // 6. DigitalOcean Uptime Healthcheck HTTP Server
   const server = http.createServer(async (req, res) => {
@@ -96,6 +226,7 @@ export async function bootstrap() {
   // 7. Graceful Shutdown Handler
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "Received shutdown signal. Performing graceful cleanup...");
+    telegramBotListener.stop();
     telegramService.stop();
     reconciler.stop();
 

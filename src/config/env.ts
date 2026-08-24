@@ -22,6 +22,10 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('production'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   PORT: z.coerce.number().default(3000),
+  DRY_RUN: z.string().optional().transform((val) => {
+    // Must default to dry-run/blocked if unset or set to anything other than "false"
+    return val === 'false' ? false : true;
+  }),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

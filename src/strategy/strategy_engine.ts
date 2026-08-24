@@ -48,7 +48,7 @@ export class StrategyEngine {
     currentMarkPrice: number,
     availableMarginUsdt: number,
     activeTradesCount: number,
-    meta: SymbolMetadata,
+    meta: SymbolMetadata | null,
     initialAlertPrice?: number
   ): AdmissionDecision {
     // 1. Create frozen strategy snapshot for this trade

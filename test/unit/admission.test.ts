@@ -43,7 +43,7 @@ describe('Phase 3: Strategy Engine & Admission Barrier Unit Tests', () => {
 
     expect(decision.admitted).toBe(true);
     expect(decision.primarySizing?.valid).toBe(true);
-    expect(decision.configSnapshot.version).toBe('1.0.0');
+    expect(decision.configSnapshot.version).toBe('1.1.0');
     expect(Object.isFrozen(decision.configSnapshot)).toBe(true);
   });
 

@@ -63,9 +63,20 @@ export class TradeStateMachine {
     await this.repository.saveTrade(trade);
     await this.transition(trade, TradeState.ENTRY_SUBMITTED, "Submitting primary market entry");
 
-    // 1. Submit Primary Market Entry
+    // 1. Enforce Configured Leverage (e.g. 10x)
+    try {
+      await this.adapter.setLeverage(trade.symbol, trade.strategyConfigSnapshot.leverage);
+    } catch (err: any) {
+      logger.warn({ symbol: trade.symbol, err: err.message }, "Leverage set warning (may already be set on exchange)");
+    }
+
+    // 2. Submit Primary Market Entry with Native Preset TP/SL
     const primarySizing = decision.primarySizing!;
     const primaryClientOrderId = `b-${trade.id}-p1`;
+    const meta = await this.adapter.getSymbolMetadata(trade.symbol);
+    const estMarkPrice = primarySizing.markPrice || (await this.adapter.getMarkPrice(trade.symbol));
+    const presetTp = meta ? (estMarkPrice * (1 + trade.strategyConfigSnapshot.takeProfitPct)).toFixed(meta.pricePrecision) : undefined;
+    const presetSl = meta ? (estMarkPrice * (1 - trade.strategyConfigSnapshot.stopLossPct)).toFixed(meta.pricePrecision) : undefined;
 
     const entryRes = await this.adapter.submitEntryOrder({
       symbol: trade.symbol,
@@ -73,7 +84,9 @@ export class TradeStateMachine {
       type: 'MARKET',
       positionSide: 'LONG',
       quantity: primarySizing.quantityStr,
-      clientOrderId: primaryClientOrderId
+      clientOrderId: primaryClientOrderId,
+      presetTakeProfitPrice: presetTp,
+      presetStopLossPrice: presetSl
     });
 
     if (!entryRes.success) {
@@ -89,7 +102,7 @@ export class TradeStateMachine {
 
     await this.transition(trade, TradeState.POSITION_ACTIVE_UNPROTECTED, "Primary entry filled");
 
-    // 2. Fetch authoritative position
+    // 3. Fetch authoritative position
     const pos = await this.adapter.getActivePosition(trade.symbol);
     if (!pos) {
       trade.lastError = "Position not found after primary fill confirmation";
@@ -101,36 +114,60 @@ export class TradeStateMachine {
     trade.primaryEntryPrice = pos.entryPrice;
     trade.weightedAverageEntryPrice = pos.entryPrice;
 
-    // 3. Establish Native Whole-Position Protection (quantity: "0")
-    const meta = await this.adapter.getSymbolMetadata(trade.symbol);
-    const tpPrice = (pos.entryPrice * (1 + trade.strategyConfigSnapshot.takeProfitPct)).toFixed(meta.pricePrecision);
-    const slPrice = (pos.entryPrice * (1 - trade.strategyConfigSnapshot.stopLossPct)).toFixed(meta.pricePrecision);
+    // 4. Establish & Authoritatively Verify Native Protection
+    const pricePrecision = meta ? meta.pricePrecision : 4;
+    const exactTpPrice = (pos.entryPrice * (1 + trade.strategyConfigSnapshot.takeProfitPct)).toFixed(pricePrecision);
+    const exactSlPrice = (pos.entryPrice * (1 - trade.strategyConfigSnapshot.stopLossPct)).toFixed(pricePrecision);
 
-    const tpRes = await this.adapter.establishWholePositionProtection({
-      symbol: trade.symbol,
-      positionSide: 'LONG',
-      planType: 'TAKE_PROFIT',
-      triggerPrice: tpPrice,
-      clientAlgoId: `b-${trade.id}-tp1`
-    });
+    // Attempt to discover active protection orders created by preset TP/SL
+    const discoveredAlgos = await this.adapter.listActiveProtectionOrders(trade.symbol, 'LONG');
+    let activeTpId: string | undefined;
+    let activeSlId: string | undefined;
 
-    const slRes = await this.adapter.establishWholePositionProtection({
-      symbol: trade.symbol,
-      positionSide: 'LONG',
-      planType: 'STOP_LOSS',
-      triggerPrice: slPrice,
-      clientAlgoId: `b-${trade.id}-sl1`
-    });
-
-    if (!tpRes.success || !slRes.success) {
-      trade.lastError = `Protection creation failed: TP=${tpRes.errorMessage}, SL=${slRes.errorMessage}`;
-      await this.transition(trade, TradeState.RECONCILIATION_REQUIRED, "Failed to establish native protection");
-      return trade;
+    if (discoveredAlgos && discoveredAlgos.length > 0) {
+      for (const algo of discoveredAlgos) {
+        if (algo.status === 'UNTRIGGERED' || algo.status === 'NEW') {
+          const verified = await this.adapter.verifyProtectionOrder(trade.symbol, algo.orderId);
+          if (verified && (verified.status === 'UNTRIGGERED' || verified.status === 'NEW')) {
+            if (!activeTpId) activeTpId = algo.orderId;
+            else if (!activeSlId) activeSlId = algo.orderId;
+          }
+        }
+      }
     }
 
-    // 3b. Independent Authoritative Read: Verify both TP and SL exist with active status ('UNTRIGGERED' or 'NEW') on exchange
-    const tpVerify = await this.adapter.verifyProtectionOrder(trade.symbol, tpRes.orderId!);
-    const slVerify = await this.adapter.verifyProtectionOrder(trade.symbol, slRes.orderId!);
+    // Safety fallback: If discrete algo IDs were not discovered, place whole-position protection explicitly
+    if (!activeTpId || !activeSlId) {
+      logger.info({ symbol: trade.symbol }, "Preset protection IDs not discovered; placing explicit native whole-position protection.");
+      const tpRes = await this.adapter.establishWholePositionProtection({
+        symbol: trade.symbol,
+        positionSide: 'LONG',
+        planType: 'TAKE_PROFIT',
+        triggerPrice: exactTpPrice,
+        clientAlgoId: `b-${trade.id}-tp1`
+      });
+
+      const slRes = await this.adapter.establishWholePositionProtection({
+        symbol: trade.symbol,
+        positionSide: 'LONG',
+        planType: 'STOP_LOSS',
+        triggerPrice: exactSlPrice,
+        clientAlgoId: `b-${trade.id}-sl1`
+      });
+
+      if (!tpRes.success || !slRes.success) {
+        trade.lastError = `Protection creation failed: TP=${tpRes.errorMessage}, SL=${slRes.errorMessage}`;
+        await this.transition(trade, TradeState.RECONCILIATION_REQUIRED, "Failed to establish native protection");
+        return trade;
+      }
+
+      activeTpId = tpRes.orderId;
+      activeSlId = slRes.orderId;
+    }
+
+    // Authoritative Independent Verification
+    const tpVerify = await this.adapter.verifyProtectionOrder(trade.symbol, activeTpId!);
+    const slVerify = await this.adapter.verifyProtectionOrder(trade.symbol, activeSlId!);
 
     const isTpActive = tpVerify && (tpVerify.status === 'UNTRIGGERED' || tpVerify.status === 'NEW');
     const isSlActive = slVerify && (slVerify.status === 'UNTRIGGERED' || slVerify.status === 'NEW');
@@ -141,16 +178,16 @@ export class TradeStateMachine {
       return trade;
     }
 
-    trade.activeTpOrderId = tpRes.orderId;
-    trade.activeSlOrderId = slRes.orderId;
-    trade.currentTpTriggerPrice = tpPrice;
-    trade.currentSlTriggerPrice = slPrice;
+    trade.activeTpOrderId = activeTpId;
+    trade.activeSlOrderId = activeSlId;
+    trade.currentTpTriggerPrice = exactTpPrice;
+    trade.currentSlTriggerPrice = exactSlPrice;
 
     await this.transition(trade, TradeState.POSITION_PROTECTED, "Initial native whole-position protection independently verified on exchange");
 
     // 4. Submit Secondary Limit Entry Order (if configured)
     if (decision.secondarySizing && decision.secondarySizing.valid) {
-      const secondaryPrice = (pos.entryPrice * (1 - trade.strategyConfigSnapshot.secondaryEntryDropPct)).toFixed(meta.pricePrecision);
+      const secondaryPrice = (pos.entryPrice * (1 - trade.strategyConfigSnapshot.secondaryEntryDropPct)).toFixed(meta!.pricePrecision);
       const secondaryClientOrderId = `b-${trade.id}-p2`;
 
       const limitRes = await this.adapter.submitEntryOrder({
@@ -193,8 +230,8 @@ export class TradeStateMachine {
     trade.secondaryFilledAt = Date.now();
 
     const meta = await this.adapter.getSymbolMetadata(trade.symbol);
-    const combinedTp = (pos.entryPrice * (1 + trade.strategyConfigSnapshot.takeProfitPct)).toFixed(meta.pricePrecision);
-    const combinedSl = (pos.entryPrice * (1 - trade.strategyConfigSnapshot.stopLossPct)).toFixed(meta.pricePrecision);
+    const combinedTp = (pos.entryPrice * (1 + trade.strategyConfigSnapshot.takeProfitPct)).toFixed(meta!.pricePrecision);
+    const combinedSl = (pos.entryPrice * (1 - trade.strategyConfigSnapshot.stopLossPct)).toFixed(meta!.pricePrecision);
 
     // Modify existing protection in-place
     if (trade.activeTpOrderId) {
