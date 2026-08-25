@@ -12,12 +12,12 @@ export const DEFAULT_STRATEGY_CONFIG: Readonly<StrategyConfig> = Object.freeze({
   maxNotionalCapUsd: 70.00,
   leverage: 10,
   secondaryEntryDropPct: 0.0, // N/A
-  takeProfitPct: 0.035,            // +3.5% TP
-  stopLossPct: 0.015,              // -1.5% SL
+  takeProfitPct: 0.025,            // +2.5% TP
+  stopLossPct: 0.020,              // -2.0% SL
   velocityWindowSec: 300,          // 5 minute evaluation window
   velocityMaxPriceMovePct: 0.030,  // Max 3.0% move during velocity window
   tradeTimeoutSec: 14400,          // 4 hours maximum holding time
-  symbolCooldownSec: 7200,         // 120 minutes cooldown per symbol
+  symbolCooldownSec: 3600,         // 60 minutes cooldown per symbol
   maxConcurrentTrades: 3           // Maximum 3 active concurrent trades
 });
 

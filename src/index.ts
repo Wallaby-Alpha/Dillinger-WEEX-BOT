@@ -4,7 +4,7 @@ import { SYSTEM_CONFIG } from './config/system.config.js';
 import { SingleInstanceManager } from './utils/single_instance.js';
 import { getGitCommitId } from './utils/git_info.js';
 import { logger } from './utils/logger.js';
-import { TelegramIngestionService } from './ingestion/telegram_client.js';
+import { MexcScannerService } from './ingestion/mexc_scanner.js';
 import { StrategyEngine } from './strategy/strategy_engine.js';
 import { WeexExecutionAdapter } from './execution/adapters/weex/weex_adapter.js';
 import { InMemoryTradeRepository } from './database/trade_repository.js';
@@ -22,8 +22,7 @@ export async function bootstrap() {
   logger.info({ commitId, env: ENV.NODE_ENV }, "Starting WEEX Momentum Trading Bot...");
 
   // 2. Initialize Ingestion (Always needed)
-  const telegramService = new TelegramIngestionService();
-  const telegramBotListener = new (await import('./ingestion/telegram_bot.js')).TelegramBotListener(telegramService);
+  const scannerService = new MexcScannerService(SYSTEM_CONFIG.reconciliationIntervalMs ? 300 : 300);
 
   if (ENV.DRY_RUN) {
     logger.info("=========================================");
@@ -31,17 +30,15 @@ export async function bootstrap() {
     logger.info("   EXECUTION AND STRATEGY ENGINES ARE UNREACHABLE.");
     logger.info("=========================================");
 
-    telegramService.onAlert(async (alert) => {
+    scannerService.onAlert(async (alert) => {
       logger.info({ alertId: alert.alertId, symbol: alert.symbol, normalizedOutput: alert }, "DRY_RUN: Normalized alert produced.");
     });
 
-    telegramService.start();
-    telegramBotListener.start();
+    scannerService.start();
 
     const shutdown = async (signal: string) => {
       logger.info({ signal }, "Received shutdown signal. Performing graceful cleanup...");
-      telegramBotListener.stop();
-      telegramService.stop();
+      scannerService.stop();
       singleInstance.releaseLock();
       logger.info("Graceful shutdown complete.");
       process.exit(0);
@@ -157,7 +154,7 @@ export async function bootstrap() {
   }
 
   // 4. Wire Ingestion -> Strategy -> Execution Pipeline
-  telegramService.onAlert(async (alert) => {
+  scannerService.onAlert(async (alert) => {
     try {
       logger.info({ alertId: alert.alertId, symbol: alert.symbol }, "Processing incoming alert through pipeline.");
 
@@ -197,8 +194,7 @@ export async function bootstrap() {
 
   // 5. Start Background Loops
   reconciler.start(SYSTEM_CONFIG.reconciliationIntervalMs);
-  telegramService.start();
-  telegramBotListener.start();
+  scannerService.start();
 
   // 6. DigitalOcean Uptime Healthcheck HTTP Server
   const server = http.createServer(async (req, res) => {
@@ -226,8 +222,7 @@ export async function bootstrap() {
   // 7. Graceful Shutdown Handler
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "Received shutdown signal. Performing graceful cleanup...");
-    telegramBotListener.stop();
-    telegramService.stop();
+    scannerService.stop();
     reconciler.stop();
 
     server.close(() => {

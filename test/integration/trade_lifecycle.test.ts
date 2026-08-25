@@ -5,7 +5,7 @@ import { CooldownTracker } from '../../src/strategy/cooldown_tracker.js';
 import { MockExecutionAdapter } from '../../src/execution/adapters/mock/mock_adapter.js';
 import { InMemoryTradeRepository } from '../../src/database/trade_repository.js';
 import { TradeStateMachine } from '../../src/execution/trade_state_machine.js';
-import { AlertParser } from '../../src/ingestion/alert_parser.js';
+
 import { TradeState } from '../../src/types/trade.types.js';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -26,10 +26,13 @@ describe('Phase 5: End-to-End Trade Lifecycle Integration Suite', () => {
     const strategyEngine = new StrategyEngine(customConfig, cooldownTracker);
     const stateMachine = new TradeStateMachine(adapter, repository, cooldownTracker);
 
-    // 2. Ingestion Layer: Parse incoming Telegram alert
-    const parseResult = AlertParser.parse('FLAGGED: BTC Momentum Buy Signal');
-    expect(parseResult.valid).toBe(true);
-    const alert = parseResult.alert!;
+    const alert = {
+      alertId: 'alert_test_BTCUSDT',
+      symbol: 'BTCUSDT',
+      timestamp: Date.now(),
+      source: 'TEST',
+      rawText: 'FLAGGED: BTC Momentum Buy Signal'
+    };
 
     // 3. Strategy Layer: Evaluate alert against strategy rules
     const meta = await adapter.getSymbolMetadata(alert.symbol);
@@ -83,9 +86,9 @@ describe('Phase 5: End-to-End Trade Lifecycle Integration Suite', () => {
     const finalSnap = await adapter.fetchExchangeState(trade.symbol);
     expect(finalSnap.position).toBeNull();
 
-    // Verify 4-hour cooldown is now active
+    // Verify 0-hour cooldown for Take Profit
     const cooldownStatus = cooldownTracker.isCoolingDown(trade.symbol);
-    expect(cooldownStatus.active).toBe(true);
+    expect(cooldownStatus.active).toBe(false);
 
     if (fs.existsSync(cooldownPath)) {
       fs.unlinkSync(cooldownPath);

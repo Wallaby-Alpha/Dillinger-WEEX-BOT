@@ -6,7 +6,7 @@ import { MockExecutionAdapter } from '../../src/execution/adapters/mock/mock_ada
 import { InMemoryTradeRepository } from '../../src/database/trade_repository.js';
 import { TradeStateMachine } from '../../src/execution/trade_state_machine.js';
 import { ReconciliationEngine } from '../../src/execution/reconciler.js';
-import { AlertParser } from '../../src/ingestion/alert_parser.js';
+
 import { TradeState } from '../../src/types/trade.types.js';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -22,8 +22,13 @@ describe('Phase 5: Reconciliation Engine Integration Tests', () => {
     const stateMachine = new TradeStateMachine(adapter, repository, cooldownTracker);
     const reconciler = new ReconciliationEngine(stateMachine, adapter, repository);
 
-    const parseResult = AlertParser.parse('$SOL Long Signal');
-    const alert = parseResult.alert!;
+    const alert = {
+      alertId: 'alert_test_SOLUSDT',
+      symbol: 'SOLUSDT',
+      timestamp: Date.now(),
+      source: 'TEST',
+      rawText: '$SOL Long Signal'
+    };
     const meta = await adapter.getSymbolMetadata(alert.symbol);
 
     const decision = strategyEngine.evaluateAlert(
@@ -63,8 +68,13 @@ describe('Phase 5: Reconciliation Engine Integration Tests', () => {
     const stateMachine = new TradeStateMachine(adapter, repository, cooldownTracker);
     const reconciler = new ReconciliationEngine(stateMachine, adapter, repository);
 
-    const parseResult = AlertParser.parse('$ETH Signal');
-    const alert = parseResult.alert!;
+    const alert = {
+      alertId: 'alert_test_ETHUSDT',
+      symbol: 'ETHUSDT',
+      timestamp: Date.now(),
+      source: 'TEST',
+      rawText: '$ETH Signal'
+    };
     const meta = await adapter.getSymbolMetadata(alert.symbol);
 
     const decision = strategyEngine.evaluateAlert(

@@ -24,6 +24,14 @@ export class CooldownTracker {
     logger.info({ symbol, durationSeconds, expiresAt: new Date(expiresAt).toISOString(), reason }, "Symbol cooldown registered.");
   }
 
+  clearCooldown(symbol: string): void {
+    if (this.memoryCache.has(symbol)) {
+      this.memoryCache.delete(symbol);
+      this.persistToDisk();
+      logger.info({ symbol }, "Symbol cooldown cleared.");
+    }
+  }
+
   isCoolingDown(symbol: string, nowMs: number = Date.now()): CooldownStatus {
     const record = this.memoryCache.get(symbol);
     if (!record) {

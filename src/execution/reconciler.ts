@@ -59,8 +59,11 @@ export class ReconciliationEngine {
         TradeState.EXPANDED_PROTECTED
       ];
       if (activePositionStates.includes(trade.state)) {
-        logger.info({ tradeId: trade.id, symbol: trade.symbol }, "Position confirmed flat on exchange (TP/SL filled). Finalizing trade.");
-        await this.stateMachine.closeTrade(trade, "EXCHANGE_NATIVE_TPSL_FILLED");
+        const markPrice = await this.adapter.getMarkPrice(trade.symbol);
+        const exitReason = markPrice > trade.weightedAverageEntryPrice ? 'TAKE_PROFIT_TRIGGERED' : 'STOP_LOSS_TRIGGERED';
+        
+        logger.info({ tradeId: trade.id, symbol: trade.symbol, exitReason }, "Position confirmed flat on exchange (TP/SL filled). Finalizing trade.");
+        await this.stateMachine.closeTrade(trade, exitReason);
         return;
       }
     }

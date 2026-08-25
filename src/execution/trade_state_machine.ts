@@ -288,11 +288,17 @@ export class TradeStateMachine {
     trade.closedAt = Date.now();
     await this.transition(trade, TradeState.CLOSED_VERIFIED, `Trade closed and 0 exposure verified (${reason})`);
 
-    // 4. Register 4-hour symbol cooldown
-    this.cooldownTracker.setCooldown(
-      trade.symbol,
-      trade.strategyConfigSnapshot.symbolCooldownSec,
-      `TRADE_COMPLETED_${trade.id}`
-    );
+    // 4. Register conditional symbol cooldown (Loss-Only)
+    const isTakeProfit = reason.includes('TAKE_PROFIT') || reason.includes('PROFIT');
+    if (!isTakeProfit) {
+      this.cooldownTracker.setCooldown(
+        trade.symbol,
+        trade.strategyConfigSnapshot.symbolCooldownSec,
+        `TRADE_COMPLETED_${trade.id}`
+      );
+    } else {
+      logger.info({ symbol: trade.symbol }, "Take Profit hit. Symbol remains immediately eligible (0 cooldown).");
+      this.cooldownTracker.clearCooldown(trade.symbol);
+    }
   }
 }
