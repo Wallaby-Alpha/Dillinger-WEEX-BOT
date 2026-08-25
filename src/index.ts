@@ -163,10 +163,10 @@ export async function bootstrap() {
       const availableMargin = await adapter.getAvailableMargin();
       const activeTrades = await repository.getActiveTrades();
 
-      // Prevent concurrent trades on the same symbol
-      const isSymbolAlreadyActive = activeTrades.some(t => t.symbol === alert.symbol);
-      if (isSymbolAlreadyActive) {
-        logger.info({ symbol: alert.symbol }, "Skipping alert: A trade is already actively open for this symbol.");
+      // Prevent concurrent trades on the same symbol by strictly checking the Exchange
+      const existingPosition = await adapter.getActivePosition(alert.symbol);
+      if (existingPosition && parseFloat(existingPosition.size) > 0) {
+        logger.info({ symbol: alert.symbol, size: existingPosition.size }, "Skipping alert: A position is already actively open on the exchange for this symbol.");
         return;
       }
 
