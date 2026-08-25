@@ -238,7 +238,7 @@ export async function bootstrap() {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
-if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/'))) {
+if (!process.env.VITEST) {
   bootstrap().catch((err) => {
     logger.fatal({ err: err.message }, "Fatal error during bot bootstrap.");
     process.exit(1);
