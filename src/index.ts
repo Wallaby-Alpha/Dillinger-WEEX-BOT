@@ -163,6 +163,13 @@ export async function bootstrap() {
       const availableMargin = await adapter.getAvailableMargin();
       const activeTrades = await repository.getActiveTrades();
 
+      // Prevent concurrent trades on the same symbol
+      const isSymbolAlreadyActive = activeTrades.some(t => t.symbol === alert.symbol);
+      if (isSymbolAlreadyActive) {
+        logger.info({ symbol: alert.symbol }, "Skipping alert: A trade is already actively open for this symbol.");
+        return;
+      }
+
       const decision = strategyEngine.evaluateAlert(
         alert,
         markPrice,
