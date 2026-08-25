@@ -120,11 +120,14 @@ export class MexcScannerService {
   private buildUniverse(tickers: MexcTicker[]): MexcTicker[] {
     const invalidSuffixes = ['3L', '3S', '5L', '5S', 'DOWN', 'UP', 'BEAR', 'BULL'];
     const stablecoins = ['USDCUSDT', 'BUSDUSDT', 'TUSDUSDT', 'DAIUSDT', 'EURUSDT'];
+    const excludedCoins = ['BTC', 'ETH', 'SOL', 'XRP', 'BNB', 'ADA', 'DOGE', 'AVAX', 'TRX', 'LTC', 'BCH', 'DOT'];
     
     let filtered = tickers.filter(t => {
       if (!t.symbol.endsWith('USDT')) return false;
-      if (t.symbol === 'BTCUSDT') return false;
       if (stablecoins.includes(t.symbol)) return false;
+
+      const baseSymbol = t.symbol.replace('USDT', '');
+      if (excludedCoins.includes(baseSymbol)) return false;
       
       for (const suffix of invalidSuffixes) {
         if (t.symbol.endsWith(`${suffix}USDT`)) return false;
