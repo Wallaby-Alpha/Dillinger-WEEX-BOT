@@ -15,7 +15,11 @@ export interface NormalizedAlert {
   /** Raw unparsed alert text for audit logging */
   rawText: string;
   /** Optional metadata extracted from alert */
-  metadata?: Record<string, any>;
+  metadata?: {
+    direction?: 'LONG' | 'SHORT';
+    atr14?: number;
+    [key: string]: any;
+  };
 }
 
 export type AlertAdmissionStatus = 

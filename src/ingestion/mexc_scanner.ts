@@ -120,14 +120,19 @@ export class MexcScannerService {
   private buildUniverse(tickers: MexcTicker[]): MexcTicker[] {
     const invalidSuffixes = ['3L', '3S', '5L', '5S', 'DOWN', 'UP', 'BEAR', 'BULL'];
     const stablecoins = ['USDCUSDT', 'BUSDUSDT', 'TUSDUSDT', 'DAIUSDT', 'EURUSDT'];
-    const excludedCoins = ['BTC', 'ETH', 'SOL', 'XRP', 'BNB', 'ADA', 'DOGE', 'AVAX', 'TRX', 'LTC', 'BCH', 'DOT'];
+    const blacklist = [
+      "SN85", "SN64", "BOSON", "EUR", "NOS",
+      "ALEO", "TLOS", "XMR", "EIGEN", "FAR",
+      "TTMION", "ROAM", "NOCON", "NAVX", "INODON",
+      "NEMON", "FON", "GOATED"
+    ];
     
     let filtered = tickers.filter(t => {
       if (!t.symbol.endsWith('USDT')) return false;
       if (stablecoins.includes(t.symbol)) return false;
 
       const baseSymbol = t.symbol.replace('USDT', '');
-      if (excludedCoins.includes(baseSymbol)) return false;
+      if (blacklist.includes(baseSymbol)) return false;
       
       for (const suffix of invalidSuffixes) {
         if (t.symbol.endsWith(`${suffix}USDT`)) return false;
@@ -143,66 +148,66 @@ export class MexcScannerService {
 
   private async evaluateCandidate(ticker: MexcTicker): Promise<boolean> {
     const quoteVolume = parseFloat(ticker.quoteVolume);
-    if (quoteVolume < 250000) {
-      return false; // Hard gate: Minimum $250k 24h volume
-    }
+    if (quoteVolume < 250000) return false;
 
-    const askPrice = parseFloat(ticker.askPrice);
-    const bidPrice = parseFloat(ticker.bidPrice);
-    if (bidPrice > 0) {
-      const spread = (askPrice - bidPrice) / bidPrice;
-      if (spread > 0.0080) {
-         return false; // Hard gate: 80 bps max spread
-      }
-    } else {
-       return false;
-    }
-
-    // Fetch 1h klines
-    const res = await fetch(`https://api.mexc.com/api/v3/klines?symbol=${ticker.symbol}&interval=60m&limit=100`);
-    if (!res.ok) {
-       return false;
-    }
+    // Fetch 5m klines
+    const res = await fetch(`https://api.mexc.com/api/v3/klines?symbol=${ticker.symbol}&interval=5m&limit=100`);
+    if (!res.ok) return false;
+    
     const klines = await res.json();
-    if (klines.length < 100) {
-       return false; // Hard gate: 100 1h lookback candles
-    }
+    if (klines.length < 50) return false;
 
     // kline format: [openTime, open, high, low, close, volume, closeTime, quoteVolume]
     const closes = klines.map((k: any) => parseFloat(k[4]));
-    const ema20 = this.calculateEma(closes, 20);
-    const currentPrice = closes[closes.length - 1];
+    const volumes = klines.map((k: any) => parseFloat(k[5]));
+    const highs = klines.map((k: any) => parseFloat(k[2]));
+    const lows = klines.map((k: any) => parseFloat(k[3]));
+    
+    const currentVolume = volumes[volumes.length - 1];
+    const avgVolume20 = this.calculateSma(volumes, 20);
+    const rsi14 = this.calculateRsi(closes, 14);
+    const atr14 = this.calculateAtr(highs, lows, closes, 14);
 
-    if (ema20 === null || ema20 <= 0) return false;
+    if (avgVolume20 === null || rsi14 === null || atr14 === null) return false;
 
-    const extension = (currentPrice - ema20) / ema20;
-    if (extension > 0.20) {
-       return false; // Hard gate: Max EMA20 extension 20%
+    // Condition 1: Volume Surge
+    if (currentVolume <= avgVolume20 * 1.8) return false;
+
+    // Condition 2: RSI Extremes (Variation 4)
+    let direction: 'LONG' | 'SHORT' | null = null;
+    if (rsi14 < 25) {
+      direction = 'LONG';
+    } else if (rsi14 > 75) {
+      direction = 'SHORT';
     }
 
-    const score = this.scoreSymbol(klines, closes, ema20);
-    return score >= 0.55;
+    if (!direction) return false;
+
+    // Attach decision and ATR to the alert callback if we succeed
+    if (this.onAlertCallback) {
+      const alertId = `alert_MEXC_${ticker.symbol}_${Math.floor(Date.now() / (5 * 60 * 1000))}`;
+      const alert: NormalizedAlert = {
+        alertId,
+        symbol: ticker.symbol,
+        timestamp: Date.now(),
+        source: 'MEXC_SCANNER',
+        rawText: `MEXC Scanner Alert: Variation 4 ${direction} detected for ${ticker.symbol}`,
+        metadata: {
+          rawSymbolExtracted: ticker.symbol.replace('USDT', ''),
+          quoteVolume: ticker.quoteVolume,
+          lastPrice: ticker.lastPrice,
+          direction,
+          atr14
+        }
+      };
+      
+      // Override default behavior, evaluateCandidate returns false but fires manually
+      await this.onAlertCallback(alert);
+    }
+
+    return false; // Handled manually above
   }
 
-  private calculateEma(prices: number[], period: number): number | null {
-    if (prices.length < period) return null;
-    
-    // Simple SMA for the first EMA value
-    let sum = 0;
-    for (let i = 0; i < period; i++) {
-       sum += prices[i];
-    }
-    let ema = sum / period;
-    
-    const multiplier = 2 / (period + 1);
-    
-    for (let i = period; i < prices.length; i++) {
-      ema = (prices[i] - ema) * multiplier + ema;
-    }
-    
-    return ema;
-  }
-  
   private calculateSma(data: number[], period: number): number | null {
     if (data.length < period) return null;
     let sum = 0;
@@ -239,35 +244,39 @@ export class MexcScannerService {
       return 100 - (100 / (1 + rs));
   }
 
-  private scoreSymbol(klines: any[], closes: number[], ema20: number): number {
-    let score = 0;
-    const currentPrice = closes[closes.length - 1];
+  private calculateAtr(highs: number[], lows: number[], closes: number[], period: number = 14): number | null {
+    if (highs.length <= period) return null;
     
-    // 1. Trend Structure (Price > EMA20)
-    if (currentPrice > ema20) {
-        score += 0.25;
+    let trSum = 0;
+    const trueRanges: number[] = [];
+
+    // First TR is just High - Low
+    trueRanges.push(highs[0] - lows[0]);
+
+    for (let i = 1; i < highs.length; i++) {
+      const high = highs[i];
+      const low = lows[i];
+      const prevClose = closes[i - 1];
+      
+      const tr = Math.max(
+        high - low,
+        Math.abs(high - prevClose),
+        Math.abs(low - prevClose)
+      );
+      trueRanges.push(tr);
     }
-    
-    // 2. EMA20 > EMA50 check
-    const ema50 = this.calculateEma(closes, 50);
-    if (ema50 && ema20 > ema50) {
-        score += 0.25;
+
+    // Initial ATR is simple average of first 'period' TRs
+    for (let i = 1; i <= period; i++) {
+      trSum += trueRanges[i];
     }
-    
-    // 3. Volume Surge
-    const volumes = klines.map((k: any) => parseFloat(k[5]));
-    const currentVolume = volumes[volumes.length - 1];
-    const avgVolume20 = this.calculateSma(volumes, 20);
-    if (avgVolume20 && currentVolume > avgVolume20 * 1.5) {
-        score += 0.25;
+    let atr = trSum / period;
+
+    // Smoothing for the rest
+    for (let i = period + 1; i < trueRanges.length; i++) {
+      atr = ((atr * (period - 1)) + trueRanges[i]) / period;
     }
-    
-    // 4. RSI Momentum (50-70 ideal accumulation)
-    const rsi = this.calculateRsi(closes, 14);
-    if (rsi && rsi >= 50 && rsi <= 75) {
-        score += 0.25;
-    }
-    
-    return score;
+
+    return atr;
   }
 }

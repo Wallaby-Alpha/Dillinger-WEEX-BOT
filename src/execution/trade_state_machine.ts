@@ -75,14 +75,28 @@ export class TradeStateMachine {
     const primaryClientOrderId = `b-${trade.id}-p1`;
     const meta = await this.adapter.getSymbolMetadata(trade.symbol);
     const estMarkPrice = primarySizing.markPrice || (await this.adapter.getMarkPrice(trade.symbol));
-    const presetTp = meta ? (estMarkPrice * (1 + trade.strategyConfigSnapshot.takeProfitPct)).toFixed(meta.pricePrecision) : undefined;
-    const presetSl = meta ? (estMarkPrice * (1 - trade.strategyConfigSnapshot.stopLossPct)).toFixed(meta.pricePrecision) : undefined;
+    const config = trade.strategyConfigSnapshot;
+    
+    const direction = alert.metadata?.direction === 'SHORT' ? 'SHORT' : 'LONG';
+    const side = direction === 'LONG' ? 'BUY' : 'SELL';
+    const atr14 = alert.metadata?.atr14 || 0;
+    const pricePrecision = meta ? meta.pricePrecision : 4;
+
+    // Calculate Dynamic TP/SL using ATR and R:R
+    const slDistance = atr14 * config.atrMultiplierSl;
+    const tpDistance = slDistance * config.riskRewardRatio;
+    
+    const presetSlNum = direction === 'LONG' ? estMarkPrice - slDistance : estMarkPrice + slDistance;
+    const presetTpNum = direction === 'LONG' ? estMarkPrice + tpDistance : estMarkPrice - tpDistance;
+
+    const presetTp = presetTpNum.toFixed(pricePrecision);
+    const presetSl = presetSlNum.toFixed(pricePrecision);
 
     const entryRes = await this.adapter.submitEntryOrder({
       symbol: trade.symbol,
-      side: 'BUY',
+      side: side,
       type: 'MARKET',
-      positionSide: 'LONG',
+      positionSide: direction,
       quantity: primarySizing.quantityStr,
       clientOrderId: primaryClientOrderId,
       presetTakeProfitPrice: presetTp,
@@ -115,12 +129,14 @@ export class TradeStateMachine {
     trade.weightedAverageEntryPrice = pos.entryPrice;
 
     // 4. Establish & Authoritatively Verify Native Protection
-    const pricePrecision = meta ? meta.pricePrecision : 4;
-    const exactTpPrice = (pos.entryPrice * (1 + trade.strategyConfigSnapshot.takeProfitPct)).toFixed(pricePrecision);
-    const exactSlPrice = (pos.entryPrice * (1 - trade.strategyConfigSnapshot.stopLossPct)).toFixed(pricePrecision);
+    const exactSlNum = direction === 'LONG' ? pos.entryPrice - slDistance : pos.entryPrice + slDistance;
+    const exactTpNum = direction === 'LONG' ? pos.entryPrice + tpDistance : pos.entryPrice - tpDistance;
+    
+    const exactTpPrice = exactTpNum.toFixed(pricePrecision);
+    const exactSlPrice = exactSlNum.toFixed(pricePrecision);
 
     // Attempt to discover active protection orders created by preset TP/SL
-    const discoveredAlgos = await this.adapter.listActiveProtectionOrders(trade.symbol, 'LONG');
+    const discoveredAlgos = await this.adapter.listActiveProtectionOrders(trade.symbol, direction);
     let activeTpId: string | undefined;
     let activeSlId: string | undefined;
 
@@ -141,7 +157,7 @@ export class TradeStateMachine {
       logger.info({ symbol: trade.symbol }, "Preset protection IDs not discovered; placing explicit native whole-position protection.");
       const tpRes = await this.adapter.establishWholePositionProtection({
         symbol: trade.symbol,
-        positionSide: 'LONG',
+        positionSide: direction,
         planType: 'TAKE_PROFIT',
         triggerPrice: exactTpPrice,
         clientAlgoId: `b-${trade.id}-tp1`
@@ -149,7 +165,7 @@ export class TradeStateMachine {
 
       const slRes = await this.adapter.establishWholePositionProtection({
         symbol: trade.symbol,
-        positionSide: 'LONG',
+        positionSide: direction,
         planType: 'STOP_LOSS',
         triggerPrice: exactSlPrice,
         clientAlgoId: `b-${trade.id}-sl1`
@@ -230,8 +246,14 @@ export class TradeStateMachine {
     trade.secondaryFilledAt = Date.now();
 
     const meta = await this.adapter.getSymbolMetadata(trade.symbol);
-    const combinedTp = (pos.entryPrice * (1 + trade.strategyConfigSnapshot.takeProfitPct)).toFixed(meta!.pricePrecision);
-    const combinedSl = (pos.entryPrice * (1 - trade.strategyConfigSnapshot.stopLossPct)).toFixed(meta!.pricePrecision);
+    
+    // Note: Secondary limits are disabled in Variation 4 (secondaryEntryDropPct: 0.0).
+    // Using a safe fallback constant for compilation safety in case it is ever re-enabled.
+    const fallbackSlPct = 0.02; 
+    const fallbackTpPct = 0.05;
+    
+    const combinedTp = (pos.entryPrice * (1 + fallbackTpPct)).toFixed(meta!.pricePrecision);
+    const combinedSl = (pos.entryPrice * (1 - fallbackSlPct)).toFixed(meta!.pricePrecision);
 
     // Modify existing protection in-place
     if (trade.activeTpOrderId) {

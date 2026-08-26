@@ -11,12 +11,12 @@ export const DEFAULT_STRATEGY_CONFIG: Readonly<StrategyConfig> = Object.freeze({
   secondaryNotionalUsd: 0.00, // Disable secondary limit order
   maxNotionalCapUsd: 70.00,
   leverage: 10,
-  secondaryEntryDropPct: 0.0, // N/A
-  takeProfitPct: 0.025,            // +2.5% TP
-  stopLossPct: 0.020,              // -2.0% SL
+  secondaryEntryDropPct: 0.0,      // N/A
+  atrMultiplierSl: 1.2,            // SL = 1.2 x ATR(14)
+  riskRewardRatio: 2.0,            // TP = 2.0 x Risk
   velocityWindowSec: 300,          // 5 minute evaluation window
   velocityMaxPriceMovePct: 0.030,  // Max 3.0% move during velocity window
-  tradeTimeoutSec: 14400,          // 4 hours maximum holding time
+  tradeTimeoutSec: 3600,           // 60 minutes maximum holding time (12 candles)
   symbolCooldownSec: 3600,         // 60 minutes cooldown per symbol
   maxConcurrentTrades: 3           // Maximum 3 active concurrent trades
 });

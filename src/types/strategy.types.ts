@@ -18,10 +18,10 @@ export interface StrategyConfig {
   leverage: number;
   /** Secondary limit order price drop percentage (e.g. 0.01 = 1.0% drop) */
   secondaryEntryDropPct: number;
-  /** Take Profit percentage above entry (e.g. 0.025 = +2.5%) */
-  takeProfitPct: number;
-  /** Stop Loss percentage below entry (e.g. 0.015 = -1.5%) */
-  stopLossPct: number;
+  /** Stop Loss distance multiplier of ATR(14) (e.g. 1.2) */
+  atrMultiplierSl: number;
+  /** Take Profit Reward to Risk ratio multiplier (e.g. 2.0) */
+  riskRewardRatio: number;
   /** Velocity check evaluation window in seconds (e.g. 300 = 5 minutes) */
   velocityWindowSec: number;
   /** Maximum allowable adverse price move before rejection (e.g. 0.03 = 3.0%) */
