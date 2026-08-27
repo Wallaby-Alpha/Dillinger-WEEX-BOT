@@ -163,6 +163,12 @@ export async function bootstrap() {
       const availableMargin = await adapter.getAvailableMargin();
       const activeTrades = await repository.getActiveTrades();
 
+      // Prevent SHORT trades per user request
+      if (alert.metadata?.direction === 'SHORT') {
+        logger.info({ symbol: alert.symbol }, "Skipping alert: Engine is currently configured to only allow LONG trades. Disregarding SHORT signal.");
+        return;
+      }
+
       // Prevent concurrent trades on the same symbol by strictly checking the Exchange
       const existingPosition = await adapter.getActivePosition(alert.symbol);
       if (existingPosition && parseFloat(existingPosition.size) > 0) {
