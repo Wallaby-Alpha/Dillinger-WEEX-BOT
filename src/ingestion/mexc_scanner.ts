@@ -141,14 +141,14 @@ export class MexcScannerService {
       return true;
     });
 
-    // Sort by quoteVolume descending and take top 150
+    // Sort by quoteVolume descending and take top 300
     filtered.sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume));
-    return filtered.slice(0, 150);
+    return filtered.slice(0, 300);
   }
 
   private async evaluateCandidate(ticker: MexcTicker): Promise<boolean> {
     const quoteVolume = parseFloat(ticker.quoteVolume);
-    if (quoteVolume < 250000) return false;
+    if (quoteVolume < 200000) return false;
 
     // Fetch 5m klines
     const res = await fetch(`https://api.mexc.com/api/v3/klines?symbol=${ticker.symbol}&interval=5m&limit=100`);
