@@ -32,6 +32,14 @@ export interface StrategyConfig {
   symbolCooldownSec: number;
   /** Maximum number of concurrent open trades allowed simultaneously */
   maxConcurrentTrades: number;
+  /** Minimum ATR% required for entry (e.g. 0.01 = 1%) */
+  minAtrPct: number;
+  /** Limit order timeout in seconds before cancellation (e.g. 900 = 15 mins) */
+  entryOrderTimeoutSec: number;
+  /** Window in seconds to monitor for early exit after fill (e.g. 900 = 15 mins) */
+  earlyExitWindowSec: number;
+  /** Price drop percentage to trigger early exit (e.g. 0.008 = 0.8%) */
+  earlyExitDropPct: number;
 }
 
 export interface SizingResult {

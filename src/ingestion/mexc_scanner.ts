@@ -1,6 +1,7 @@
 import { NormalizedAlert } from '../types/alert.types.js';
 import { logger } from '../utils/logger.js';
 import { ENV } from '../config/env.js';
+import { DEFAULT_STRATEGY_CONFIG } from '../config/strategy.config.js';
 
 export type AlertHandlerCallback = (alert: NormalizedAlert) => Promise<void>;
 
@@ -80,7 +81,28 @@ export class MexcScannerService {
       const universe = this.buildUniverse(tickers);
       logger.info({ universeSize: universe.length }, "MEXC Universe built.");
 
-      // 3. Process each candidate
+      // 3. Fetch BTC condition
+      const btcRes = await fetch(`https://api.mexc.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=100`);
+      let btcEma50: number | null = null;
+      let btcLastPrice: number | null = null;
+      if (btcRes.ok) {
+        const btcKlines = await btcRes.json();
+        const btcCloses = btcKlines.map((k: any) => parseFloat(k[4]));
+        btcEma50 = this.calculateEma(btcCloses, 50);
+        btcLastPrice = btcCloses[btcCloses.length - 1];
+      }
+
+      if (btcEma50 === null || btcLastPrice === null) {
+        logger.error("Failed to fetch BTC klines or calculate EMA50. Skipping scan cycle.");
+        return;
+      }
+      
+      if (btcLastPrice >= btcEma50) {
+        logger.info({ btcLastPrice, btcEma50 }, "BTC is not below EMA50, skipping cycle for long-only strategy.");
+        return;
+      }
+
+      // 4. Process each candidate
       for (const ticker of universe) {
         if (!this.isRunning) break;
         
@@ -173,15 +195,13 @@ export class MexcScannerService {
     // Condition 1: Volume Surge
     if (currentVolume <= avgVolume20 * 1.8) return false;
 
-    // Condition 2: RSI Extremes (Variation 4)
-    let direction: 'LONG' | 'SHORT' | null = null;
-    if (rsi14 < 25) {
-      direction = 'LONG';
-    } else if (rsi14 > 75) {
-      direction = 'SHORT';
-    }
+    // Condition 2: ATR% Filter
+    const currentPrice = closes[closes.length - 1];
+    const atrPct = atr14 / currentPrice;
+    if (atrPct < DEFAULT_STRATEGY_CONFIG.minAtrPct) return false;
 
-    if (!direction) return false;
+    // Condition 3: RSI Extremes (LONG ONLY)
+    if (rsi14 >= 25) return false;
 
     // Attach decision and ATR to the alert callback if we succeed
     if (this.onAlertCallback) {
@@ -191,13 +211,15 @@ export class MexcScannerService {
         symbol: ticker.symbol,
         timestamp: Date.now(),
         source: 'MEXC_SCANNER',
-        rawText: `MEXC Scanner Alert: Variation 4 ${direction} detected for ${ticker.symbol}`,
+        rawText: `MEXC Scanner Alert: Long setup detected for ${ticker.symbol}`,
         metadata: {
           rawSymbolExtracted: ticker.symbol.replace('USDT', ''),
           quoteVolume: ticker.quoteVolume,
           lastPrice: ticker.lastPrice,
-          direction,
-          atr14
+          direction: 'LONG',
+          atr14,
+          atrPct,
+          rsi14
         }
       };
       
@@ -215,6 +237,23 @@ export class MexcScannerService {
         sum += data[i];
     }
     return sum / period;
+  }
+
+  private calculateEma(data: number[], period: number): number | null {
+    if (data.length < period) return null;
+    
+    // SMA for first value
+    let sum = 0;
+    for (let i = 0; i < period; i++) {
+        sum += data[i];
+    }
+    let ema = sum / period;
+    
+    const multiplier = 2 / (period + 1);
+    for (let i = period; i < data.length; i++) {
+        ema = (data[i] - ema) * multiplier + ema;
+    }
+    return ema;
   }
   
   private calculateRsi(prices: number[], period: number = 14): number | null {

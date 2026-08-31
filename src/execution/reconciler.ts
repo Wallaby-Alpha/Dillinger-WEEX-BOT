@@ -51,12 +51,30 @@ export class ReconciliationEngine {
       return;
     }
 
-    // 2. Closed Position Detection (e.g. TP or SL executed natively on exchange)
+    // 2. Unfilled Limit Order Check
+    if (trade.state === TradeState.ENTRY_SUBMITTED) {
+      if (snapshot.position && parseFloat(snapshot.position.size) > 0) {
+        logger.info({ tradeId: trade.id }, "Primary limit order filled. Transitioning to active.");
+        await this.stateMachine.handlePrimaryFill(trade);
+        return;
+      }
+      
+      const entryAgeSec = (now - trade.createdAt) / 1000;
+      if (entryAgeSec >= (trade.strategyConfigSnapshot.entryOrderTimeoutSec || 900)) {
+        logger.info({ tradeId: trade.id }, "Primary limit order expired without fill. Cancelling and closing.");
+        await this.stateMachine.closeTrade(trade, "LIMIT_ENTRY_TIMEOUT");
+        return;
+      }
+      return; // Still waiting for fill
+    }
+
+    // 3. Closed Position Detection (e.g. TP or SL executed natively on exchange)
     if (!snapshot.position || parseFloat(snapshot.position.size) === 0) {
       const activePositionStates = [
         TradeState.POSITION_PROTECTED,
         TradeState.SECONDARY_LIMIT_SUBMITTED,
-        TradeState.EXPANDED_PROTECTED
+        TradeState.EXPANDED_PROTECTED,
+        TradeState.POSITION_ACTIVE_UNPROTECTED
       ];
       if (activePositionStates.includes(trade.state)) {
         const markPrice = await this.adapter.getMarkPrice(trade.symbol);
@@ -68,7 +86,28 @@ export class ReconciliationEngine {
       }
     }
 
-    // 3. Secondary Fill Detection
+    // 4. Early Exit Rule (0.8% drop within first 15 mins)
+    const activePositionStates = [
+      TradeState.POSITION_PROTECTED,
+      TradeState.SECONDARY_LIMIT_SUBMITTED,
+      TradeState.EXPANDED_PROTECTED,
+      TradeState.POSITION_ACTIVE_UNPROTECTED
+    ];
+    if (activePositionStates.includes(trade.state) && trade.primaryFilledAt) {
+      const fillAgeSec = (now - trade.primaryFilledAt) / 1000;
+      if (fillAgeSec <= (trade.strategyConfigSnapshot.earlyExitWindowSec || 900)) {
+        const markPrice = await this.adapter.getMarkPrice(trade.symbol);
+        const dropLimit = trade.primaryEntryPrice * (1 - (trade.strategyConfigSnapshot.earlyExitDropPct || 0.008));
+        
+        if (markPrice <= dropLimit) {
+          logger.info({ tradeId: trade.id, fillAgeSec, markPrice, dropLimit }, "Early exit rule triggered (0.8% drop within 15 mins). Force closing.");
+          await this.stateMachine.closeTrade(trade, "EARLY_EXIT_VELOCITY");
+          return;
+        }
+      }
+    }
+
+    // 5. Secondary Fill Detection
     if (trade.state === TradeState.SECONDARY_LIMIT_SUBMITTED && snapshot.position) {
       const exchangeSize = parseFloat(snapshot.position.size);
       const recordedSize = parseFloat(trade.currentPositionSize);
@@ -80,7 +119,7 @@ export class ReconciliationEngine {
       }
     }
 
-    // 4. Protection Verification Check
+    // 6. Protection Verification Check
     if (trade.state === TradeState.POSITION_PROTECTED || trade.state === TradeState.EXPANDED_PROTECTED) {
       if (!snapshot.activeTpOrder || !snapshot.activeSlOrder) {
         logger.warn({ tradeId: trade.id, symbol: trade.symbol, snapshot }, "Authoritative protection mismatch detected during reconciliation.");

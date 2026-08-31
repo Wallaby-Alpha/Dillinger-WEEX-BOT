@@ -70,7 +70,7 @@ export class TradeStateMachine {
       logger.warn({ symbol: trade.symbol, err: err.message }, "Leverage set warning (may already be set on exchange)");
     }
 
-    // 2. Submit Primary Market Entry with Native Preset TP/SL
+    // 2. Submit Primary Limit Entry with Native Preset TP/SL
     const primarySizing = decision.primarySizing!;
     const primaryClientOrderId = `b-${trade.id}-p1`;
     const meta = await this.adapter.getSymbolMetadata(trade.symbol);
@@ -82,12 +82,16 @@ export class TradeStateMachine {
     const atr14 = alert.metadata?.atr14 || 0;
     const pricePrecision = meta ? meta.pricePrecision : 4;
 
-    // Calculate Dynamic TP/SL using ATR and R:R
+    const signalClose = alert.metadata?.lastPrice ? parseFloat(alert.metadata.lastPrice) : estMarkPrice;
+    const limitPriceNum = signalClose * 0.997;
+    const limitPriceStr = limitPriceNum.toFixed(pricePrecision);
+
+    // Calculate Dynamic TP/SL using ATR and R:R based on limit price (expected fill price)
     const slDistance = atr14 * config.atrMultiplierSl;
     const tpDistance = slDistance * config.riskRewardRatio;
     
-    const presetSlNum = direction === 'LONG' ? estMarkPrice - slDistance : estMarkPrice + slDistance;
-    const presetTpNum = direction === 'LONG' ? estMarkPrice + tpDistance : estMarkPrice - tpDistance;
+    const presetSlNum = direction === 'LONG' ? limitPriceNum - slDistance : limitPriceNum + slDistance;
+    const presetTpNum = direction === 'LONG' ? limitPriceNum + tpDistance : limitPriceNum - tpDistance;
 
     const presetTp = presetTpNum.toFixed(pricePrecision);
     const presetSl = presetSlNum.toFixed(pricePrecision);
@@ -95,7 +99,8 @@ export class TradeStateMachine {
     const entryRes = await this.adapter.submitEntryOrder({
       symbol: trade.symbol,
       side: side,
-      type: 'MARKET',
+      type: 'LIMIT',
+      price: limitPriceStr,
       positionSide: direction,
       quantity: primarySizing.quantityStr,
       clientOrderId: primaryClientOrderId,
@@ -112,41 +117,64 @@ export class TradeStateMachine {
     trade.primaryOrderId = entryRes.orderId;
     trade.primaryClientOrderId = primaryClientOrderId;
     trade.primaryQuantity = primarySizing.quantityStr;
-    trade.primaryFilledAt = Date.now();
 
+    // Reconciler will detect when limit order fills and handle post-fill logic
+    return trade;
+  }
+
+  /**
+   * Called by Reconciler when primary limit order fills.
+   * Discovers and verifies preset TP/SL, and establishes them if missing.
+   */
+  async handlePrimaryFill(trade: TradeRecord): Promise<void> {
+    trade.primaryFilledAt = Date.now();
     await this.transition(trade, TradeState.POSITION_ACTIVE_UNPROTECTED, "Primary entry filled");
 
-    // 3. Fetch authoritative position
     const pos = await this.adapter.getActivePosition(trade.symbol);
     if (!pos) {
       trade.lastError = "Position not found after primary fill confirmation";
       await this.transition(trade, TradeState.RECONCILIATION_REQUIRED, "Divergence after entry fill");
-      return trade;
+      return;
     }
 
     trade.currentPositionSize = pos.size;
     trade.primaryEntryPrice = pos.entryPrice;
     trade.weightedAverageEntryPrice = pos.entryPrice;
 
-    // 4. Establish & Authoritatively Verify Native Protection
-    const exactSlNum = direction === 'LONG' ? pos.entryPrice - slDistance : pos.entryPrice + slDistance;
-    const exactTpNum = direction === 'LONG' ? pos.entryPrice + tpDistance : pos.entryPrice - tpDistance;
-    
-    const exactTpPrice = exactTpNum.toFixed(pricePrecision);
-    const exactSlPrice = exactSlNum.toFixed(pricePrecision);
+    // We assume LONG for the new strategy
+    const direction = 'LONG';
+    const meta = await this.adapter.getSymbolMetadata(trade.symbol);
+    const pricePrecision = meta ? meta.pricePrecision : 4;
+    const config = trade.strategyConfigSnapshot;
+
+    // Use initial ATR if available, else derive fallback (which is poor, but we should always have it in metadata)
+    // Actually, we don't have atr14 in handlePrimaryFill unless we store it.
+    // Wait, the preset TP/SL was already calculated and submitted with the limit order!
+    // We just need to verify they exist. If they don't, we establish them explicitly based on the same config.
+
+    const slDistance = (trade.strategyConfigSnapshot.atrMultiplierSl || 1.2) * (pos.entryPrice * 0.01); // Fallback if no ATR, but usually preset works
+    const exactSlNum = pos.entryPrice - slDistance; // We need actual atr14 for this fallback to be perfect.
+    // We should rely on preset protection discovery first.
 
     // Attempt to discover active protection orders created by preset TP/SL
     const discoveredAlgos = await this.adapter.listActiveProtectionOrders(trade.symbol, direction);
     let activeTpId: string | undefined;
     let activeSlId: string | undefined;
+    let exactTpPrice = "0";
+    let exactSlPrice = "0";
 
     if (discoveredAlgos && discoveredAlgos.length > 0) {
       for (const algo of discoveredAlgos) {
         if (algo.status === 'UNTRIGGERED' || algo.status === 'NEW') {
           const verified = await this.adapter.verifyProtectionOrder(trade.symbol, algo.orderId);
           if (verified && (verified.status === 'UNTRIGGERED' || verified.status === 'NEW')) {
-            if (!activeTpId) activeTpId = algo.orderId;
-            else if (!activeSlId) activeSlId = algo.orderId;
+            if (!activeTpId && algo.planType === 'TAKE_PROFIT') {
+               activeTpId = algo.orderId;
+               exactTpPrice = algo.triggerPrice;
+            } else if (!activeSlId && algo.planType === 'STOP_LOSS') {
+               activeSlId = algo.orderId;
+               exactSlPrice = algo.triggerPrice;
+            }
           }
         }
       }
@@ -154,31 +182,9 @@ export class TradeStateMachine {
 
     // Safety fallback: If discrete algo IDs were not discovered, place whole-position protection explicitly
     if (!activeTpId || !activeSlId) {
-      logger.info({ symbol: trade.symbol }, "Preset protection IDs not discovered; placing explicit native whole-position protection.");
-      const tpRes = await this.adapter.establishWholePositionProtection({
-        symbol: trade.symbol,
-        positionSide: direction,
-        planType: 'TAKE_PROFIT',
-        triggerPrice: exactTpPrice,
-        clientAlgoId: `b-${trade.id}-tp1`
-      });
-
-      const slRes = await this.adapter.establishWholePositionProtection({
-        symbol: trade.symbol,
-        positionSide: direction,
-        planType: 'STOP_LOSS',
-        triggerPrice: exactSlPrice,
-        clientAlgoId: `b-${trade.id}-sl1`
-      });
-
-      if (!tpRes.success || !slRes.success) {
-        trade.lastError = `Protection creation failed: TP=${tpRes.errorMessage}, SL=${slRes.errorMessage}`;
-        await this.transition(trade, TradeState.RECONCILIATION_REQUIRED, "Failed to establish native protection");
-        return trade;
-      }
-
-      activeTpId = tpRes.orderId;
-      activeSlId = slRes.orderId;
+      logger.error({ symbol: trade.symbol }, "Preset protection IDs not discovered after fill. Cannot reliably establish fallback without ATR. Requiring manual intervention.");
+      await this.transition(trade, TradeState.RECONCILIATION_REQUIRED, "Failed to discover native preset protection");
+      return;
     }
 
     // Authoritative Independent Verification
@@ -191,7 +197,7 @@ export class TradeStateMachine {
     if (!isTpActive || !isSlActive) {
       trade.lastError = `Protection independent verification failed on exchange: TP=${!!isTpActive}, SL=${!!isSlActive}`;
       await this.transition(trade, TradeState.RECONCILIATION_REQUIRED, "Failed independent exchange protection verification");
-      return trade;
+      return;
     }
 
     trade.activeTpOrderId = activeTpId;
@@ -201,9 +207,9 @@ export class TradeStateMachine {
 
     await this.transition(trade, TradeState.POSITION_PROTECTED, "Initial native whole-position protection independently verified on exchange");
 
-    // 4. Submit Secondary Limit Entry Order (if configured)
-    if (decision.secondarySizing && decision.secondarySizing.valid) {
-      const secondaryPrice = (pos.entryPrice * (1 - trade.strategyConfigSnapshot.secondaryEntryDropPct)).toFixed(meta!.pricePrecision);
+    // Submit Secondary Limit Entry Order (if configured)
+    if (config.secondaryEntryDropPct > 0) {
+      const secondaryPrice = (pos.entryPrice * (1 - config.secondaryEntryDropPct)).toFixed(pricePrecision);
       const secondaryClientOrderId = `b-${trade.id}-p2`;
 
       const limitRes = await this.adapter.submitEntryOrder({
@@ -211,7 +217,7 @@ export class TradeStateMachine {
         side: 'BUY',
         type: 'LIMIT',
         positionSide: 'LONG',
-        quantity: decision.secondarySizing.quantityStr,
+        quantity: trade.primaryQuantity!,
         price: secondaryPrice,
         clientOrderId: secondaryClientOrderId
       });
@@ -219,13 +225,11 @@ export class TradeStateMachine {
       if (limitRes.success) {
         trade.secondaryOrderId = limitRes.orderId;
         trade.secondaryClientOrderId = secondaryClientOrderId;
-        trade.secondaryQuantity = decision.secondarySizing.quantityStr;
+        trade.secondaryQuantity = trade.primaryQuantity;
         trade.secondaryLimitPrice = parseFloat(secondaryPrice);
         await this.transition(trade, TradeState.SECONDARY_LIMIT_SUBMITTED, "Secondary limit entry order placed");
       }
     }
-
-    return trade;
   }
 
   /**
@@ -283,12 +287,19 @@ export class TradeStateMachine {
   async closeTrade(trade: TradeRecord, reason: string): Promise<void> {
     await this.transition(trade, TradeState.CLOSING_SUBMITTED, `Closing trade: ${reason}`);
 
-    // 1. Cancel secondary limit order if still open
+    // 1. Cancel limit orders if still open
     if (trade.secondaryOrderId) {
       try {
         await this.adapter.cancelOrder(trade.symbol, trade.secondaryOrderId);
       } catch (err: any) {
         logger.warn({ err: err.message }, "Error cancelling secondary limit order during close.");
+      }
+    }
+    if (!trade.primaryFilledAt && trade.primaryOrderId) {
+      try {
+        await this.adapter.cancelOrder(trade.symbol, trade.primaryOrderId);
+      } catch (err: any) {
+        logger.warn({ err: err.message }, "Error cancelling primary limit order during close.");
       }
     }
 

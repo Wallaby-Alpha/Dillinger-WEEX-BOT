@@ -18,7 +18,11 @@ export const DEFAULT_STRATEGY_CONFIG: Readonly<StrategyConfig> = Object.freeze({
   velocityMaxPriceMovePct: 0.030,  // Max 3.0% move during velocity window
   tradeTimeoutSec: 3600,           // 60 minutes maximum holding time (12 candles)
   symbolCooldownSec: 3600,         // 60 minutes cooldown per symbol
-  maxConcurrentTrades: 3           // Maximum 3 active concurrent trades
+  maxConcurrentTrades: 3,          // Maximum 3 active concurrent trades
+  minAtrPct: 0.01,                 // Minimum 1% ATR for entry
+  entryOrderTimeoutSec: 900,       // 15 minutes limit order timeout
+  earlyExitWindowSec: 900,         // Monitor first 15 mins for early exit
+  earlyExitDropPct: 0.008          // 0.8% drop triggers early exit
 });
 
 /**
