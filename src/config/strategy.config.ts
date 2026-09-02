@@ -19,7 +19,9 @@ export const DEFAULT_STRATEGY_CONFIG: Readonly<StrategyConfig> = Object.freeze({
   tradeTimeoutSec: 3600,           // 60 minutes maximum holding time (12 candles)
   symbolCooldownSec: 3600,         // 60 minutes cooldown per symbol
   maxConcurrentTrades: 3,          // Maximum 3 active concurrent trades
-  minAtrPct: 0.01,                 // Minimum 1% ATR for entry
+  minAtrPct: 0.0058,               // Minimum 0.58% ATR for entry (top third volatility)
+  limitEntryOffsetPct: 0.002,      // 0.2% limit offset below signal close
+  btcMaxEmaBufferPct: 0.0035,      // Allow BTC < EMA50 or within 0.35% above it
   entryOrderTimeoutSec: 900,       // 15 minutes limit order timeout
   earlyExitWindowSec: 900,         // Monitor first 15 mins for early exit
   earlyExitDropPct: 0.008          // 0.8% drop triggers early exit

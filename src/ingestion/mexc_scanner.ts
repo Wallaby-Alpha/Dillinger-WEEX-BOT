@@ -97,8 +97,9 @@ export class MexcScannerService {
         return;
       }
       
-      if (btcLastPrice >= btcEma50) {
-        logger.info({ btcLastPrice, btcEma50 }, "BTC is not below EMA50, skipping cycle for long-only strategy.");
+      const maxAllowedBtc = btcEma50 * (1 + (DEFAULT_STRATEGY_CONFIG.btcMaxEmaBufferPct ?? 0.0035));
+      if (btcLastPrice > maxAllowedBtc) {
+        logger.info({ btcLastPrice, btcEma50, maxAllowedBtc }, "BTC is above allowed EMA50 threshold, skipping cycle for long-only strategy.");
         return;
       }
 

@@ -93,7 +93,7 @@ export class ReconciliationEngine {
       TradeState.EXPANDED_PROTECTED,
       TradeState.POSITION_ACTIVE_UNPROTECTED
     ];
-    if (activePositionStates.includes(trade.state) && trade.primaryFilledAt) {
+    if (activePositionStates.includes(trade.state) && trade.primaryFilledAt && trade.primaryEntryPrice) {
       const fillAgeSec = (now - trade.primaryFilledAt) / 1000;
       if (fillAgeSec <= (trade.strategyConfigSnapshot.earlyExitWindowSec || 900)) {
         const markPrice = await this.adapter.getMarkPrice(trade.symbol);

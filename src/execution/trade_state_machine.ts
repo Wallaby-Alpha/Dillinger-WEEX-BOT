@@ -83,7 +83,8 @@ export class TradeStateMachine {
     const pricePrecision = meta ? meta.pricePrecision : 4;
 
     const signalClose = alert.metadata?.lastPrice ? parseFloat(alert.metadata.lastPrice) : estMarkPrice;
-    const limitPriceNum = signalClose * 0.997;
+    const limitOffset = config.limitEntryOffsetPct ?? 0.002;
+    const limitPriceNum = signalClose * (1 - limitOffset);
     const limitPriceStr = limitPriceNum.toFixed(pricePrecision);
 
     // Calculate Dynamic TP/SL using ATR and R:R based on limit price (expected fill price)
@@ -168,12 +169,14 @@ export class TradeStateMachine {
         if (algo.status === 'UNTRIGGERED' || algo.status === 'NEW') {
           const verified = await this.adapter.verifyProtectionOrder(trade.symbol, algo.orderId);
           if (verified && (verified.status === 'UNTRIGGERED' || verified.status === 'NEW')) {
-            if (!activeTpId && algo.planType === 'TAKE_PROFIT') {
+            const planType = (algo as any).planType || (verified as any).planType;
+            const triggerPrice = (algo as any).triggerPrice || verified.stopPrice || verified.price || "0";
+            if (!activeTpId && (!planType || planType === 'TAKE_PROFIT')) {
                activeTpId = algo.orderId;
-               exactTpPrice = algo.triggerPrice;
-            } else if (!activeSlId && algo.planType === 'STOP_LOSS') {
+               exactTpPrice = triggerPrice;
+            } else if (!activeSlId && (!planType || planType === 'STOP_LOSS')) {
                activeSlId = algo.orderId;
-               exactSlPrice = algo.triggerPrice;
+               exactSlPrice = triggerPrice;
             }
           }
         }
@@ -321,16 +324,21 @@ export class TradeStateMachine {
     trade.closedAt = Date.now();
     await this.transition(trade, TradeState.CLOSED_VERIFIED, `Trade closed and 0 exposure verified (${reason})`);
 
-    // 4. Register conditional symbol cooldown (Loss-Only)
+    // 4. Register conditional symbol cooldown (Loss-Only, excluding unfilled limit timeouts)
     const isTakeProfit = reason.includes('TAKE_PROFIT') || reason.includes('PROFIT');
-    if (!isTakeProfit) {
+    const isLimitTimeout = reason === 'LIMIT_ENTRY_TIMEOUT' || reason.includes('LIMIT_ENTRY_TIMEOUT');
+    if (!isTakeProfit && !isLimitTimeout) {
       this.cooldownTracker.setCooldown(
         trade.symbol,
         trade.strategyConfigSnapshot.symbolCooldownSec,
         `TRADE_COMPLETED_${trade.id}`
       );
     } else {
-      logger.info({ symbol: trade.symbol }, "Take Profit hit. Symbol remains immediately eligible (0 cooldown).");
+      if (isTakeProfit) {
+        logger.info({ symbol: trade.symbol }, "Take Profit hit. Symbol remains immediately eligible (0 cooldown).");
+      } else {
+        logger.info({ symbol: trade.symbol }, "Limit entry timed out without fill. Symbol remains immediately eligible (0 cooldown).");
+      }
       this.cooldownTracker.clearCooldown(trade.symbol);
     }
   }
