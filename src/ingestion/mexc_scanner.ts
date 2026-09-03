@@ -81,27 +81,7 @@ export class MexcScannerService {
       const universe = this.buildUniverse(tickers);
       logger.info({ universeSize: universe.length }, "MEXC Universe built.");
 
-      // 3. Fetch BTC condition
-      const btcRes = await fetch(`https://api.mexc.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=100`);
-      let btcEma50: number | null = null;
-      let btcLastPrice: number | null = null;
-      if (btcRes.ok) {
-        const btcKlines = await btcRes.json();
-        const btcCloses = btcKlines.map((k: any) => parseFloat(k[4]));
-        btcEma50 = this.calculateEma(btcCloses, 50);
-        btcLastPrice = btcCloses[btcCloses.length - 1];
-      }
 
-      if (btcEma50 === null || btcLastPrice === null) {
-        logger.error("Failed to fetch BTC klines or calculate EMA50. Skipping scan cycle.");
-        return;
-      }
-      
-      const maxAllowedBtc = btcEma50 * (1 + (DEFAULT_STRATEGY_CONFIG.btcMaxEmaBufferPct ?? 0.0035));
-      if (btcLastPrice > maxAllowedBtc) {
-        logger.info({ btcLastPrice, btcEma50, maxAllowedBtc }, "BTC is above allowed EMA50 threshold, skipping cycle for long-only strategy.");
-        return;
-      }
 
       // 4. Process each candidate
       for (const ticker of universe) {

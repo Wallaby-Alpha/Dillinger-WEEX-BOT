@@ -36,8 +36,6 @@ export interface StrategyConfig {
   minAtrPct: number;
   /** Limit entry discount offset from signal close (e.g. 0.002 = 0.2%) */
   limitEntryOffsetPct: number;
-  /** Maximum percentage above 5m EMA50 BTC is allowed to be (e.g. 0.0035 = 0.35%) */
-  btcMaxEmaBufferPct: number;
   /** Limit order timeout in seconds before cancellation (e.g. 900 = 15 mins) */
   entryOrderTimeoutSec: number;
   /** Window in seconds to monitor for early exit after fill (e.g. 900 = 15 mins) */
